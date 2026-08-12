@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# App bundle / build output
+build/
+
+# Derived icon (regenerated from icon-day.png by build-app.sh)
+assets/icon.png
+
+# Xcode (if ever opened there)
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+
+# Logs / temp
+*.log
+*.tmp
