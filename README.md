@@ -19,12 +19,18 @@ Thunderbox starts nothing until you tell it to. And when Thunderbox quits, it fl
 ## Build & run
 
 ```bash
-./build-app.sh
+./build-app.sh          # -> build/Thunderbox.app
 open build/Thunderbox.app
 ```
 
 `build-app.sh` compiles a release binary and assembles `build/Thunderbox.app` (icon +
-Info.plist, ad-hoc signed for local use). Requires the Xcode/Swift toolchain.
+Info.plist, signed with your first available identity). Requires the Xcode/Swift toolchain.
+
+To build and install into `/Applications` in one step (quits any running copy, replaces it):
+
+```bash
+./install.sh
+```
 
 To build a distributable disk image:
 
