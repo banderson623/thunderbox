@@ -184,6 +184,14 @@ whatever `assets/icon.png` is present into `Thunderbox.icns` automatically.
   processes (`ServiceRunner.livePID`) rather than UI state, so every running server's process
   group is SIGTERM'd (4s grace → SIGKILL) before the app exits — no server can outlive a quit.
 
+## Round 7 (fix)
+- **Deeper folder scan.** The scanner only walked the chosen folder + one level of subdirs, so
+  servers nested like `harness/scripts/results_server.py` (depth 2) were missed. Replaced the
+  one-level pass with a bounded recursive walk (`maxDepth = 3`, `maxDirs = 4000`) that prunes
+  junk/hidden dirs (node_modules, .git, .venv, .mypy_cache, site-packages, …). Verified it now
+  finds both csps-escalation-playground servers (ports 9000 / 8791) with no regressions or
+  noise on the other reference projects, scanning all five in ~2s.
+
 ## Explicitly out of scope (kept small on purpose)
 Full ANSI terminal emulation (interactive TUIs); editing a service's env vars in-app
 (they inherit zsh); recursive deep folder crawl; code signing/notarization (local use).

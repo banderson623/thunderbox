@@ -6,26 +6,23 @@ enum ScriptScanner {
     private static let skipDirs: Set<String> = [
         "node_modules", ".git", "dist", "build", ".next", ".nuxt", ".venv",
         "venv", "__pycache__", "vendor", ".cache", "coverage", "lib", "out",
-        ".svelte-kit", "target", ".idea", ".vscode", "tmp"
+        ".svelte-kit", "target", ".idea", ".vscode", "tmp", ".mypy_cache",
+        "site-packages", ".pytest_cache", ".tox", "Pods", ".gradle"
     ]
+
+    /// How many directory levels below the chosen folder to scan. Covers nested layouts
+    /// like `harness/scripts/…` (depth 2) while junk-dir pruning keeps it fast.
+    private static let maxDepth = 3
+    /// Safety cap on directories visited, for pathological trees.
+    private static let maxDirs = 4000
 
     // MARK: - Public entry
 
-    /// Scan `root` (and its immediate subdirectories) for npm scripts and shell scripts.
+    /// Scan `root` and its subdirectories (down to `maxDepth`, pruning junk dirs) for npm
+    /// scripts, shell scripts, and Python servers.
     static func scan(folder root: String) -> [ScriptCandidate] {
-        let fm = FileManager.default
         var candidates: [ScriptCandidate] = []
-        var dirs = [root]
-        if let children = try? fm.contentsOfDirectory(atPath: root) {
-            for child in children {
-                if skipDirs.contains(child) || child.hasPrefix(".") { continue }
-                let full = (root as NSString).appendingPathComponent(child)
-                var isDir: ObjCBool = false
-                if fm.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue {
-                    dirs.append(full)
-                }
-            }
-        }
+        let dirs = collectDirs(root)
 
         for dir in dirs {
             candidates.append(contentsOf: npmCandidates(in: dir))
@@ -40,6 +37,29 @@ enum ScriptScanner {
             return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
         return candidates
+    }
+
+    /// The chosen folder plus its subdirectories down to `maxDepth`, skipping junk/hidden
+    /// dirs and bounded by `maxDirs`.
+    private static func collectDirs(_ root: String) -> [String] {
+        let fm = FileManager.default
+        var result: [String] = []
+        func walk(_ dir: String, _ depth: Int) {
+            if result.count >= maxDirs { return }
+            result.append(dir)
+            guard depth < maxDepth,
+                  let children = try? fm.contentsOfDirectory(atPath: dir) else { return }
+            for child in children.sorted() {
+                if child.hasPrefix(".") || skipDirs.contains(child) { continue }
+                let full = (dir as NSString).appendingPathComponent(child)
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue {
+                    walk(full, depth + 1)
+                }
+            }
+        }
+        walk(root, 0)
+        return result
     }
 
     // MARK: - npm
