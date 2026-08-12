@@ -41,10 +41,17 @@ struct AboutView: View {
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary.opacity(0.8))
                     .padding(.top, 2)
+
+                Text("Your seat was pre-warmed by [Brian Anderson](https://github.com/banderson623)")
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Theme.textSecondary)
+                    .tint(Theme.accent)
+                    .padding(.top, 6)
             }
             .padding(.horizontal, 30)
             .padding(.vertical, 34)
         }
-        .frame(width: 340, height: 400)
+        .frame(width: 340, height: 448)
     }
 }
