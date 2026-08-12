@@ -70,13 +70,15 @@ perl -e 'setsid(); exec @ARGV'  →  /bin/zsh -ilc "cd <folder> && <command>"
 
 ## Releases
 
-Pushing a tag like `v1.0` triggers the GitHub Actions workflow in
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which builds the app on a
-macOS runner, packages `Thunderbox.dmg`, and attaches it to the matching GitHub Release.
+The GitHub Actions workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml)
+builds the app on a macOS runner, packages `Thunderbox.dmg`, and publishes it two ways:
 
-```bash
-git tag v1.0 && git push origin v1.0
-```
+- **Versioned release** — push a tag like `v1.0` and it becomes the official GitHub Release:
+  ```bash
+  git tag v1.0 && git push origin v1.0
+  ```
+- **Rolling `latest`** — every push to `main` rebuilds the DMG and updates a `latest`
+  **prerelease**, so there's always a current build to grab without cutting a version.
 
 ### Signing & notarization
 
