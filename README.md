@@ -78,6 +78,37 @@ macOS runner, packages `Thunderbox.dmg`, and attaches it to the matching GitHub 
 git tag v1.0 && git push origin v1.0
 ```
 
+### Signing & notarization
+
+`build-app.sh` signs with the first available identity: a **Developer ID Application** cert if
+you have one, otherwise your **Apple Development** cert, otherwise ad-hoc. Only a Developer ID
+build can be **notarized** for distribution outside the App Store; anything else will trip
+Gatekeeper on other people's Macs (they'd right-click → Open to run it).
+
+To produce a notarized DMG you need a *Developer ID Application* certificate (create one in
+**Xcode → Settings → Accounts → Manage Certificates → + → Developer ID Application**). Then:
+
+- **Locally:** store notarization creds once and build —
+  ```bash
+  xcrun notarytool store-credentials thunderbox --apple-id you@example.com --team-id L84DYWJ93D
+  NOTARY_PROFILE=thunderbox ./make-dmg.sh
+  ```
+- **In CI:** add these repo **secrets** and the workflow signs + notarizes automatically
+  (without them it still builds an ad-hoc DMG):
+
+  | Secret | What it is |
+  |---|---|
+  | `MACOS_CERT_P12` | base64 of your Developer ID Application `.p12` export |
+  | `MACOS_CERT_PASSWORD` | password for that `.p12` |
+  | `NOTARY_APPLE_ID` | Apple ID email for notarization |
+  | `NOTARY_PASSWORD` | app-specific password for that Apple ID |
+  | `NOTARY_TEAM_ID` | team id (e.g. `L84DYWJ93D`) |
+
+  Export the cert as base64 with:
+  ```bash
+  base64 -i DeveloperID.p12 | pbcopy
+  ```
+
 ## Layout
 
 ```

@@ -63,8 +63,34 @@ PLIST
 
 echo "APPL????" > "${CONTENTS}/PkgInfo"
 
-# Ad-hoc sign so macOS will run it locally without Gatekeeper complaints.
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+# --- Code signing -----------------------------------------------------------
+# Identity selection order:
+#   1. $SIGN_IDENTITY if set (e.g. a full "Developer ID Application: …" string)
+#   2. a "Developer ID Application" cert in the keychain (needed for notarized
+#      distribution outside the App Store)
+#   3. an "Apple Development" cert (signs it properly for THIS Mac / registered
+#      devices — not accepted by Gatekeeper on other machines)
+#   4. ad-hoc ("-") — the fallback for CI where no identity is installed
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+  IDENTITY="$SIGN_IDENTITY"
+else
+  IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Developer ID Application/{print $2; exit}')
+  [ -z "$IDENTITY" ] && IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Apple Development/{print $2; exit}')
+  [ -z "$IDENTITY" ] && IDENTITY="-"
+fi
+
+# Hardened runtime only makes sense (and is required) for a Developer ID build
+# destined for notarization; skip it for dev/ad-hoc signing.
+SIGN_OPTS=(--force --deep --sign "$IDENTITY")
+case "$IDENTITY" in
+  "Developer ID Application"*) SIGN_OPTS+=(--options runtime --timestamp) ;;
+esac
+
+echo "==> Signing with: ${IDENTITY}"
+codesign "${SIGN_OPTS[@]}" "$APP" 2>&1 | sed 's/^/    /' || \
+  echo "    (codesign failed — leaving unsigned)"
 
 echo "==> Done: ${APP}"
 echo "    Open with: open '${APP}'"

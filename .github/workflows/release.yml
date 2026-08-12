@@ -3,6 +3,14 @@ name: Release
 # Build a DMG and attach it to a GitHub Release whenever a version tag is pushed.
 #   git tag v1.0 && git push origin v1.0
 # Also runnable on demand from the Actions tab (uploads the DMG as a build artifact).
+#
+# Signing & notarization are OPTIONAL and activate only when these repo secrets exist:
+#   MACOS_CERT_P12         base64 of a "Developer ID Application" .p12 export
+#   MACOS_CERT_PASSWORD    password for that .p12
+#   NOTARY_APPLE_ID        Apple ID email used for notarization
+#   NOTARY_PASSWORD        app-specific password for that Apple ID
+#   NOTARY_TEAM_ID         team id (e.g. L84DYWJ93D)
+# Without them the workflow still builds an (ad-hoc-signed) DMG.
 on:
   push:
     tags:
@@ -15,13 +23,38 @@ permissions:
 jobs:
   build:
     runs-on: macos-latest
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+      NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+      NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Show toolchain
         run: swift --version
 
-      - name: Build app + DMG
+      - name: Import Developer ID certificate
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PWD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN" >/dev/null
+          # Make the temp keychain the default search list so codesign finds the identity.
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+          echo "Imported signing identities:"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Build app + DMG (signs & notarizes if creds are present)
         run: |
           chmod +x build-app.sh make-dmg.sh
           ./make-dmg.sh
