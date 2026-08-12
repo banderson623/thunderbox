@@ -166,6 +166,24 @@ whatever `assets/icon.png` is present into `Thunderbox.icns` automatically.
 - **App icon → `icon-day.png`.** `build-app.sh` now prefers `icon-day.png` for `Thunderbox.icns`;
   the About box pulls the same icon via `NSApp.applicationIconImage`.
 
+## Round 6 (follow-ups)
+- **Real code signing.** `build-app.sh` no longer ad-hoc signs: it auto-selects the first
+  available identity — Developer ID Application → Apple Development → ad-hoc — and adds hardened
+  runtime + secure timestamp only for a Developer ID build (required for notarization).
+  Override with `SIGN_IDENTITY`. NB: the keychain currently has only *Apple Development* and
+  *Apple Distribution* (App Store) certs — **no Developer ID**, so builds sign for this Mac but
+  aren't Gatekeeper-valid elsewhere until a Developer ID Application cert is created.
+- **DMG + notarization plumbing.** `make-dmg.sh` builds the app, packages a drag-to-install
+  `Thunderbox.dmg`, and — only when notarization creds are present (`NOTARY_PROFILE`, or
+  `NOTARY_APPLE_ID`/`NOTARY_PASSWORD`/`NOTARY_TEAM_ID`) and the app is Developer-ID-signed —
+  submits to `notarytool` and staples. Otherwise it cleanly skips. The release workflow imports
+  a Developer ID cert from repo secrets (`MACOS_CERT_P12`/`MACOS_CERT_PASSWORD`) into a temp
+  keychain and passes notary secrets, all gated so it still builds an ad-hoc DMG without them.
+  README documents the cert + secrets setup. (Plumbing is dormant until the cert exists.)
+- **Quit teardown hardened.** `stopAllForQuit()` now derives its kill list from the live runner
+  processes (`ServiceRunner.livePID`) rather than UI state, so every running server's process
+  group is SIGTERM'd (4s grace → SIGKILL) before the app exits — no server can outlive a quit.
+
 ## Explicitly out of scope (kept small on purpose)
 Full ANSI terminal emulation (interactive TUIs); editing a service's env vars in-app
 (they inherit zsh); recursive deep folder crawl; code signing/notarization (local use).

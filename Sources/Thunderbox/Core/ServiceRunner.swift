@@ -32,6 +32,13 @@ final class ServiceRunner: ObservableObject {
         self.service = service
     }
 
+    /// The live process-group leader pid, or nil if nothing is running. Used by quit-time
+    /// teardown so it acts on real processes rather than UI state.
+    var livePID: Int32? {
+        guard let p = process, p.isRunning else { return nil }
+        return p.processIdentifier
+    }
+
     // MARK: - Lifecycle
 
     func start() {

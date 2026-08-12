@@ -139,20 +139,19 @@ final class ServiceStore: ObservableObject {
 
     var runningCount: Int { services.filter { $0.state.isActive }.count }
 
-    /// Stop every active service. Called on quit. Sends SIGTERM to each group, waits, then
-    /// escalates to SIGKILL, blocking briefly so nothing is orphaned.
+    /// Stop every running service before the app exits. Sourced from the live runner
+    /// processes (not UI state) so nothing is missed. SIGTERM each process group, wait
+    /// briefly for a clean exit, then SIGKILL any survivor. Blocks until the group is gone
+    /// so no server outlives the app.
     func stopAllForQuit() {
-        let active = services.filter { $0.state.isActive }
-        guard !active.isEmpty else { return }
-        var pids: [Int32] = []
-        for s in active {
-            if let pid = s.pid { pids.append(pid); kill(-pid, SIGTERM) }
-        }
-        // Give them up to ~3s to exit, then SIGKILL any survivors.
-        let deadline = Date().addingTimeInterval(3.0)
+        let pids = runners.values.compactMap { $0.livePID }
+        guard !pids.isEmpty else { return }
+        for pid in pids { kill(-pid, SIGTERM) }   // signal the whole group (negative pid)
+
+        // Give them up to ~4s to exit cleanly, then SIGKILL any survivors.
+        let deadline = Date().addingTimeInterval(4.0)
         while Date() < deadline {
-            let anyAlive = pids.contains { kill(-$0, 0) == 0 }
-            if !anyAlive { return }
+            if !pids.contains(where: { kill(-$0, 0) == 0 }) { return }
             usleep(100_000)
         }
         for pid in pids where kill(-pid, 0) == 0 { kill(-pid, SIGKILL) }
