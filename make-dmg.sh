@@ -14,25 +14,41 @@ cd "$(dirname "$0")"
 APP_NAME="Thunderbox"
 APP="build/${APP_NAME}.app"
 DMG="build/${APP_NAME}.dmg"
-STAGE="build/dmg-stage"
+rm -rf build/dmg-stage   # tidy leftovers from older runs
+
+# Don't package (or rebuild the signature of) a running instance — a live app bundle
+# locks files and makes `hdiutil create` fail with "Resource busy".
+if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+  echo "==> Quitting running ${APP_NAME}…"
+  osascript -e "tell application \"${APP_NAME}\" to quit" >/dev/null 2>&1 || true
+  for _ in $(seq 1 25); do pgrep -x "$APP_NAME" >/dev/null 2>&1 || break; sleep 0.2; done
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+fi
 
 echo "==> Building app…"
 ./build-app.sh
 
+# Stage and build the image in a temp dir OUTSIDE the repo. Creating it inside build/
+# races Spotlight (mdworker) indexing that folder and fails with "Resource busy".
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/thunderbox-dmg.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+STAGE="$WORK/stage"
+TMP_DMG="$WORK/${APP_NAME}.dmg"
+
 echo "==> Staging disk image…"
-rm -rf "$STAGE" "$DMG"
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"   # drag-to-install target
 
 echo "==> Creating ${DMG}…"
-hdiutil detach "/Volumes/${APP_NAME}" >/dev/null 2>&1 || true   # clear any stale mount
-hdiutil create \
-  -volname "$APP_NAME" \
-  -srcfolder "$STAGE" \
-  -ov -format UDZO \
-  "$DMG" >/dev/null
-rm -rf "$STAGE"
+# Build the filesystem directly with makehybrid (it attaches no temporary device, so it
+# avoids the flaky `hdiutil create -srcfolder` "Resource busy" failure), then compress.
+hdiutil makehybrid -hfs -hfs-volume-name "$APP_NAME" -ov -o "$WORK/raw.dmg" "$STAGE" >/dev/null
+hdiutil convert "$WORK/raw.dmg" -format UDZO -ov -o "$TMP_DMG" >/dev/null
+mkdir -p "$(dirname "$DMG")"
+rm -f "$DMG"
+mv -f "$TMP_DMG" "$DMG"
+rm -rf "$WORK"; trap - EXIT
 
 # --- Notarize + staple (only when credentials are provided) -----------------
 notarize_submit() {
