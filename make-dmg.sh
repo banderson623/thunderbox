@@ -63,7 +63,11 @@ notarize_submit() {
 }
 
 # Only worth notarizing a Developer-ID-signed app; check what the app was signed with.
-SIGNED_BY=$(codesign -dvv "$APP" 2>&1 | awk -F'Authority=' '/Authority=/{print $2; exit}')
+# Capture codesign output first, then parse the variable — piping codesign straight into
+# `awk '…exit'` makes awk close the pipe early, SIGPIPE-ing codesign, which under
+# `set -o pipefail` would abort the script before we reach notarization.
+CODESIGN_OUT=$(codesign -dvv "$APP" 2>&1 || true)
+SIGNED_BY=$(awk -F'Authority=' '/Authority=/{print $2; exit}' <<< "$CODESIGN_OUT")
 if [ -z "${NOTARY_PROFILE:-}${NOTARY_APPLE_ID:-}" ]; then
   echo "==> Skipping notarization — no NOTARY_PROFILE or NOTARY_APPLE_ID/PASSWORD/TEAM_ID set."
   echo "    (DMG is built but not notarized; Gatekeeper will warn on other Macs.)"
