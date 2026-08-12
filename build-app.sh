@@ -17,13 +17,10 @@ swift build -c release
 
 echo "==> Preparing icon…"
 mkdir -p assets
-# Prefer icon-day.png, then icon.png, then assets/icon.png, else a generated placeholder.
+# Prefer icon-day.png, then an existing assets/icon.png, else a generated placeholder.
 if [ -f icon-day.png ]; then
   echo "    using ./icon-day.png"
   cp icon-day.png assets/icon.png
-elif [ -f icon.png ]; then
-  echo "    using ./icon.png"
-  cp icon.png assets/icon.png
 elif [ ! -f assets/icon.png ]; then
   echo "    no icon — generating placeholder"
   swift assets/gen-icon.swift assets/icon.png
