@@ -8,6 +8,9 @@ final class ServiceStore: ObservableObject {
     @Published var services: [Service] = []
     private var runners: [UUID: ServiceRunner] = [:]
 
+    /// LAN status page a phone can open; publishes its URL once listening.
+    let dashboard = DashboardServer()
+
     private let fileURL: URL
 
     init() {
@@ -17,6 +20,24 @@ final class ServiceStore: ObservableObject {
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         self.fileURL = base.appendingPathComponent("services.json")
         load()
+        dashboard.start { [weak self] in self?.dashboardEntries ?? [] }
+    }
+
+    private var dashboardEntries: [DashboardEntry] {
+        services.map { s in
+            let failed: Bool = { if case .failed = s.state { return true }; return false }()
+            return DashboardEntry(
+                name: s.name,
+                command: s.command,
+                stateLabel: s.state.label,
+                isActive: s.state.isActive,
+                isFailed: failed,
+                isServer: s.isServer,
+                lanURL: s.lanBinding == .allInterfaces
+                    ? s.detectedURL.flatMap(LANPresence.lanURL(from:)) : nil,
+                localhostOnly: s.lanBinding == .localhostOnly,
+                memoryMB: s.memoryMB)
+        }
     }
 
     // MARK: - Runner access

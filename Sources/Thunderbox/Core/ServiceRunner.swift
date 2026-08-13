@@ -25,6 +25,7 @@ final class ServiceRunner: ObservableObject {
     private var ramTimer: Timer?
     private var intentionalStop = false
     private var urlLocked = false
+    private let advertiser = BonjourAdvertiser()
 
     private let ioQueue = DispatchQueue(label: "thunderbox.io", qos: .utility)
 
@@ -109,6 +110,8 @@ final class ServiceRunner: ObservableObject {
             self.service.detectedURL = self.service.declaredPort.flatMap {
                 URL(string: "http://localhost:\($0)")
             }
+            self.service.lanBinding = .unknown
+            if self.service.detectedURL != nil { self.scheduleLANCheck() }
         }
         startRamTimer(pid: pid)
         // If it survives a moment, call it running.
@@ -190,6 +193,7 @@ final class ServiceRunner: ObservableObject {
             if let u = foundURL, self.service.isServer {
                 self.service.detectedURL = u
                 self.urlLocked = true
+                self.scheduleLANCheck()
             }
         }
     }
@@ -208,6 +212,8 @@ final class ServiceRunner: ObservableObject {
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
 
         DispatchQueue.main.async {
+            self.advertiser.stop()
+            self.service.lanBinding = .unknown
             self.service.pid = nil
             self.service.memoryMB = nil
             if self.intentionalStop {
@@ -226,6 +232,33 @@ final class ServiceRunner: ObservableObject {
 
     private func setState(_ s: RunState) {
         DispatchQueue.main.async { self.service.state = s }
+    }
+
+    // MARK: - LAN presence
+
+    /// Once we believe a server URL exists, find out whether the socket is actually
+    /// reachable from other devices (0.0.0.0) or loopback-only, and — when it is
+    /// reachable — broadcast it over Bonjour so the rest of the network can see it.
+    /// Retries a couple of times because the banner often prints before the bind.
+    private func scheduleLANCheck(attempt: Int = 0) {
+        guard service.isServer, let url = service.detectedURL else { return }
+        let port = url.port ?? (url.scheme == "https" ? 443 : 80)
+        let delay: Double = attempt == 0 ? 1.0 : 3.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.service.state.isActive else { return }
+            LANPresence.checkBinding(port: port) { [weak self] binding in
+                guard let self, self.service.state.isActive else { return }
+                self.service.lanBinding = binding
+                switch binding {
+                case .allInterfaces:
+                    self.advertiser.advertise(name: self.service.name, port: port)
+                case .localhostOnly:
+                    self.advertiser.stop()
+                case .unknown:
+                    if attempt < 2 { self.scheduleLANCheck(attempt: attempt + 1) }
+                }
+            }
+        }
     }
 
     // MARK: - RAM sampling
