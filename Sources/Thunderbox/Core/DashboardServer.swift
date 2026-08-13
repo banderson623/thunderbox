@@ -182,7 +182,8 @@ final class DashboardServer: ObservableObject {
     }
 
     /// A single self-contained page, phone-first, that refreshes itself.
-    private static func renderHTML(entries: [DashboardEntry]) -> String {
+    /// Not private so tests can check the markup without standing up a listener.
+    static func renderHTML(entries: [DashboardEntry]) -> String {
         let running = entries.filter(\.isActive).count
         let subtitle = entries.isEmpty
             ? "No services yet"
@@ -207,11 +208,23 @@ final class DashboardServer: ObservableObject {
                 </div>
                 """
             if let lan = e.lanURL {
-                inner += #"<div class="go">Open ›</div>"#
-                cards += "<a class=\"card live\" href=\"\(escape(lan.absoluteString))\">\(inner)</a>\n"
+                inner += #"<div class="go">Open ↗</div>"#
+                // target=_blank so the dashboard survives the tap. It matters most when
+                // this is installed to the home screen: standalone mode has no browser
+                // chrome and therefore no back button, so navigating in place would strand
+                // you inside the service with no way back. From a standalone web app iOS
+                // hands the link to Safari, which is the new tab/window that's wanted.
+                cards += "<a class=\"card live\" target=\"_blank\" rel=\"noopener\" "
+                    + "href=\"\(escape(lan.absoluteString))\">\(inner)</a>\n"
             } else {
-                if e.isActive && e.localhostOnly {
-                    inner += #"<div class="tag">Mac only</div>"#
+                // A running server with no link needs to say why, or it reads as a dead
+                // card you can't tap and aren't told anything about. "Checking" is the
+                // honest label while the binding probe is still settling — the page
+                // refreshes every 8s, so it resolves itself in front of you.
+                if e.isActive && e.isServer {
+                    inner += e.localhostOnly
+                        ? #"<div class="tag">Mac only</div>"#
+                        : #"<div class="tag">Checking…</div>"#
                 }
                 cards += "<div class=\"card\">\(inner)</div>\n"
             }

@@ -35,8 +35,11 @@ final class ServiceStore: ObservableObject {
                 isActive: s.state.isActive,
                 isFailed: failed,
                 isServer: s.isServer,
-                lanURL: s.lanBinding == .allInterfaces
-                    ? s.detectedURL.flatMap(LANPresence.lanURL(from:)) : nil,
+                // The relay's address wins when it's up: it listens on its own port, so
+                // rewriting the service's detected URL would point the phone at a port
+                // nothing answers on.
+                lanURL: s.lanURL ?? (s.lanBinding == .allInterfaces
+                    ? s.detectedURL.flatMap(LANPresence.lanURL(from:)) : nil),
                 localhostOnly: s.lanBinding == .localhostOnly,
                 memoryMB: s.memoryMB)
         }

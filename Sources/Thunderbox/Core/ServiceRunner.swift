@@ -467,6 +467,10 @@ final class ServiceRunner: ObservableObject {
             guard let self, self.service.state.isActive else { return }
             LANPresence.checkBinding(port: port) { [weak self] binding in
                 guard let self, self.service.state.isActive else { return }
+                // While the relay is up, reachability comes from the relay's socket, not
+                // the server's. Checking the server's port would find 127.0.0.1, downgrade
+                // the service to .localhostOnly, and hide the link that actually works.
+                guard self.proxy == nil else { return }
                 self.service.lanBinding = binding
                 switch binding {
                 case .allInterfaces:
