@@ -1,8 +1,8 @@
 #!/bin/bash
 # Build Thunderbox.app — a self-contained macOS app bundle.
 # Usage: ./build-app.sh
-# The app icon is rendered per-size by assets/gen-icon.swift. To use a hand-made
-# 1024×1024 icon instead: ICON_PNG=path/to/icon.png ./build-app.sh
+# If assets/icon.png exists (drop the real icon there, 1024×1024), it is used;
+# otherwise a placeholder is generated.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -15,22 +15,24 @@ CONTENTS="${APP}/Contents"
 echo "==> Compiling (release)…"
 swift build -c release
 
-echo "==> Rendering icon…"
+echo "==> Preparing icon…"
+mkdir -p assets
+# Prefer icon-day.png, then an existing assets/icon.png, else a generated placeholder.
+if [ -f icon-day.png ]; then
+  echo "    using ./icon-day.png"
+  cp icon-day.png assets/icon.png
+elif [ ! -f assets/icon.png ]; then
+  echo "    no icon — generating placeholder"
+  swift assets/gen-icon.swift assets/icon.png
+fi
+
 ICONSET="build/${APP_NAME}.iconset"
 rm -rf "$ICONSET"; mkdir -p "$ICONSET"
-if [ -n "${ICON_PNG:-}" ] && [ -f "${ICON_PNG}" ]; then
-  # Escape hatch: ICON_PNG=path/to/1024.png downscales a hand-made icon instead.
-  echo "    downscaling ${ICON_PNG}"
-  for sz in 16 32 64 128 256 512; do
-    sips -z $sz $sz "$ICON_PNG" --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
-    d=$((sz*2))
-    sips -z $d $d "$ICON_PNG" --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
-  done
-else
-  # Render each size natively — small sizes get a simplified design that stays
-  # legible (see assets/gen-icon.swift) instead of a downscaled blur.
-  swift assets/gen-icon.swift --iconset "$ICONSET" | sed 's/^/    /'
-fi
+for sz in 16 32 64 128 256 512; do
+  sips -z $sz $sz assets/icon.png --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
+  d=$((sz*2))
+  sips -z $d $d assets/icon.png --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
+done
 iconutil -c icns "$ICONSET" -o "build/${APP_NAME}.icns"
 
 echo "==> Assembling bundle…"
