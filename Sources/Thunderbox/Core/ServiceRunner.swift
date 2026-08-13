@@ -30,6 +30,7 @@ final class ServiceRunner: ObservableObject {
     private var watchingForPortVar = false
 
     private var proxy: LANProxy?
+    private let advertiser = BonjourAdvertiser()
 
     private let ioQueue = DispatchQueue(label: "thunderbox.io", qos: .utility)
 
@@ -148,6 +149,8 @@ final class ServiceRunner: ObservableObject {
             self.service.detectedURL = launchPort.flatMap {
                 URL(string: "http://localhost:\($0)")
             }
+            self.service.lanBinding = .unknown
+            if self.service.detectedURL != nil { self.scheduleLANCheck() }
         }
         startRamTimer(pid: pid)
         // If it survives a moment, call it running.
@@ -254,34 +257,55 @@ final class ServiceRunner: ObservableObject {
             appendSystem("LAN: no port known yet — nothing to relay.")
             return
         }
-        let listen = service.lanPort ?? Self.defaultLANPort(for: target)
+        // Prefer the port this service used last so links stay stable, but never insist on
+        // it: something may have taken it while the service was stopped. Ask for it and
+        // fall back — a working relay on a different port beats a stable port that fails.
+        var listen = service.lanPort ?? Self.defaultLANPort(for: target)
 
-        let proxy = LANProxy(listenPort: listen, targetPort: target)
-        proxy.onFailure = { [weak self] error in
-            self?.appendSystem("LAN relay stopped: \(error.localizedDescription)")
-            DispatchQueue.main.async { self?.service.lanURL = nil }
+        // Wired before start(), so a listener that dies during startup is still reported.
+        let makeProxy: (Int) -> LANProxy = { [weak self] port in
+            let proxy = LANProxy(listenPort: port, targetPort: target)
+            proxy.onFailure = { error in
+                self?.appendSystem("LAN relay stopped: \(error.localizedDescription)")
+                DispatchQueue.main.async { self?.service.lanURL = nil }
+            }
+            return proxy
         }
+
+        var proxy = makeProxy(listen)
         do {
             try proxy.start()
         } catch {
-            appendSystem("LAN relay failed: \(error.localizedDescription)")
-            return
+            guard let fallback = PortProbe.nextFree(from: listen + 1), fallback != listen else {
+                appendSystem("LAN relay failed: \(error.localizedDescription)")
+                return
+            }
+            appendSystem("LAN: port \(listen) wouldn't bind — using \(fallback) instead.")
+            listen = fallback
+            proxy = makeProxy(listen)
+            do {
+                try proxy.start()
+            } catch {
+                appendSystem("LAN relay failed: \(error.localizedDescription)")
+                return
+            }
         }
         self.proxy = proxy
 
         let addresses = PortProbe.lanAddresses()
-        let bonjour = PortProbe.localHostName
+        let bonjour = LANPresence.localHostname
         DispatchQueue.main.async {
             self.service.lanPort = listen
-            self.service.lanURL = (bonjour ?? addresses.first?.ip)
-                .flatMap { URL(string: "http://\($0):\(listen)") }
+            self.service.lanURL = URL(string: "http://\(bonjour):\(listen)")
+            // The relay listens on every interface even when the server behind it doesn't,
+            // so from the network's point of view this service is now reachable.
+            self.service.lanBinding = .allInterfaces
+            self.advertiser.advertise(name: self.service.name, port: listen)
         }
         appendSystem("LAN relay up on :\(listen) → localhost:\(target)")
+        appendSystem("  http://\(bonjour):\(listen)  (Bonjour)")
         for address in addresses {
             appendSystem("  http://\(address.ip):\(listen)  (\(address.label))")
-        }
-        if let bonjour {
-            appendSystem("  http://\(bonjour):\(listen)  (Bonjour)")
         }
         appendSystem("Anyone on this network can reach it — there's no authentication in front.")
     }
@@ -291,7 +315,13 @@ final class ServiceRunner: ObservableObject {
         proxy?.stop()
         proxy = nil
         appendSystem("LAN relay stopped.")
-        DispatchQueue.main.async { self.service.lanURL = nil }
+        DispatchQueue.main.async {
+            self.service.lanURL = nil
+            self.advertiser.stop()
+            // Re-check the server's own binding: without the relay it may be loopback-only.
+            self.service.lanBinding = .unknown
+            if self.service.state.isActive { self.scheduleLANCheck() }
+        }
     }
 
     // MARK: - Output handling
@@ -315,13 +345,17 @@ final class ServiceRunner: ObservableObject {
         }
     }
 
-    private func emit(_ texts: [String], isError: Bool) {
+    /// `isSystem` marks Thunderbox's own `»` notes. They must never reach the parsers:
+    /// several of them talk *about* ports ("LAN relay failed: Port 15173 is already in
+    /// use"), and scanning them makes the app read its own commentary back as if the
+    /// service had reported a conflict.
+    private func emit(_ texts: [String], isError: Bool, isSystem: Bool = false) {
         // URL and conflict detection off the main thread.
         var foundURL: URL?
-        if !urlLocked {
+        if !urlLocked, !isSystem {
             for t in texts { if let u = OutputParser.detectURL(in: t) { foundURL = u; break } }
         }
-        let conflict = scanForConflict(texts)
+        let conflict = isSystem ? nil : scanForConflict(texts)
 
         let now = Date()
         var newLines: [LogLine] = []
@@ -338,6 +372,7 @@ final class ServiceRunner: ObservableObject {
                 self.service.detectedURL = u
                 self.urlLocked = true
                 if let p = u.port { self.service.activePort = p }
+                self.scheduleLANCheck()
             }
             if let conflict { self.service.conflict = self.merged(conflict) }
         }
@@ -376,7 +411,9 @@ final class ServiceRunner: ObservableObject {
     }
 
     private func appendSystem(_ text: String) {
-        ioQueue.async { [weak self] in self?.emit(["» " + text], isError: false) }
+        ioQueue.async { [weak self] in
+            self?.emit(["» " + text], isError: false, isSystem: true)
+        }
     }
 
     // MARK: - Termination
@@ -390,6 +427,8 @@ final class ServiceRunner: ObservableObject {
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
 
         DispatchQueue.main.async {
+            self.advertiser.stop()
+            self.service.lanBinding = .unknown
             self.service.pid = nil
             self.service.memoryMB = nil
             if self.intentionalStop {
@@ -412,6 +451,33 @@ final class ServiceRunner: ObservableObject {
 
     private func setState(_ s: RunState) {
         DispatchQueue.main.async { self.service.state = s }
+    }
+
+    // MARK: - LAN presence
+
+    /// Once we believe a server URL exists, find out whether the socket is actually
+    /// reachable from other devices (0.0.0.0) or loopback-only, and — when it is
+    /// reachable — broadcast it over Bonjour so the rest of the network can see it.
+    /// Retries a couple of times because the banner often prints before the bind.
+    private func scheduleLANCheck(attempt: Int = 0) {
+        guard service.isServer, let url = service.detectedURL else { return }
+        let port = url.port ?? (url.scheme == "https" ? 443 : 80)
+        let delay: Double = attempt == 0 ? 1.0 : 3.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.service.state.isActive else { return }
+            LANPresence.checkBinding(port: port) { [weak self] binding in
+                guard let self, self.service.state.isActive else { return }
+                self.service.lanBinding = binding
+                switch binding {
+                case .allInterfaces:
+                    self.advertiser.advertise(name: self.service.name, port: port)
+                case .localhostOnly:
+                    self.advertiser.stop()
+                case .unknown:
+                    if attempt < 2 { self.scheduleLANCheck(attempt: attempt + 1) }
+                }
+            }
+        }
     }
 
     // MARK: - RAM sampling

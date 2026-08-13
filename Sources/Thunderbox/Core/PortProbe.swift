@@ -31,9 +31,13 @@ enum PortProbe {
 
     // MARK: - Availability
 
-    /// Can we bind `0.0.0.0:port`? Deliberately does *not* set SO_REUSEADDR, so an
-    /// existing listener on any local address (including 127.0.0.1 only) makes this
-    /// fail with EADDRINUSE — which is exactly the question being asked.
+    /// Can we bind `0.0.0.0:port`? Deliberately does *not* set SO_REUSEADDR. That option
+    /// would ignore a listener bound to 127.0.0.1 only — measured, not assumed — and a
+    /// loopback-only dev server is exactly the conflict this needs to catch.
+    ///
+    /// The cost is that a port still in TIME_WAIT reads as taken. That's the right answer
+    /// for "can a fresh server claim this", and `holder(of:)` tells the two apart: taken
+    /// here but no holder there means lingering sockets, not a live process.
     static func isFree(_ port: Int) -> Bool {
         guard port > 0, port < 65536 else { return false }
         let fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -131,14 +135,8 @@ enum PortProbe {
         return found
     }
 
-    /// The Mac's Bonjour name — `Brians-MacBook.local`. Nicer to hand someone than a
-    /// DHCP address, and it survives the lease changing. Resolvable from Apple devices
-    /// and any machine running an mDNS resolver; plain IP is the safer fallback.
-    static var localHostName: String? {
-        let name = run("/usr/sbin/scutil", ["--get", "LocalHostName"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? nil : name + ".local"
-    }
+    // The Mac's Bonjour name lives in `LANPresence.localHostname`, which reads it from
+    // SCDynamicStore rather than shelling out to scutil.
 
     // MARK: - Helpers
 

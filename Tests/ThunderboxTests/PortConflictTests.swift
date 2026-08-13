@@ -34,6 +34,16 @@ final class PortConflictTests: XCTestCase {
         XCTAssertEqual(port, 4321)
     }
 
+    /// Thunderbox's own `»` notes talk about ports too. They're kept away from the parsers
+    /// by `emit(isSystem:)`, but the phrasing itself is worth pinning: this line looked
+    /// exactly like a service reporting a collision, and the app believed itself.
+    func testThunderboxsOwnRelayNoteLooksLikeAConflict() {
+        let (isConflict, port) = OutputParser.detectPortConflict(
+            in: "» LAN relay failed: Port 15173 is already in use on this Mac.")
+        XCTAssertTrue(isConflict, "still matches — hence the isSystem guard in emit()")
+        XCTAssertEqual(port, 15173)
+    }
+
     func testOrdinaryOutputIsNotAConflict() {
         for line in ["Listening on port 4321", "  ➜  Local: http://localhost:5173/", ""] {
             XCTAssertFalse(OutputParser.detectPortConflict(in: line).isConflict, line)

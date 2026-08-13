@@ -197,7 +197,8 @@ struct ServiceEditor: View {
                 let target = Int(portValue) ?? ScriptScanner.parsePort(in: command) ?? 0
                 VStack(alignment: .leading, spacing: 3) {
                     if target > 0 {
-                        Text("Relays 0.0.0.0:\(ServiceRunner.defaultLANPort(for: target)) → localhost:\(target), so the server doesn't need to bind to anything but loopback.")
+                        // String() so the locale's grouping separator stays out of port numbers.
+                        Text("Relays 0.0.0.0:\(String(ServiceRunner.defaultLANPort(for: target))) → localhost:\(String(target)), so the server doesn't need to bind to anything but loopback.")
                     } else {
                         Text("Relays a LAN port to whatever port the service turns out to use.")
                     }

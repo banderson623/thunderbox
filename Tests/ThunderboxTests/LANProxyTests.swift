@@ -32,6 +32,25 @@ final class LANProxyTests: XCTestCase {
         XCTAssertEqual(try get("http://127.0.0.1:\(lanPort)/"), "ok")
     }
 
+    /// stop() has to leave the port genuinely released, not merely scheduled for release:
+    /// a restart calls stop-then-start, and an async teardown made the relay collide with
+    /// its own previous listener ("Port 15173 is already in use on this Mac").
+    func testStopReleasesThePortForAnImmediateRestart() throws {
+        let origin = try LoopbackServer(body: "ok")
+        defer { origin.stop() }
+        let lanPort = try XCTUnwrap(PortProbe.nextFree(from: 21_000))
+
+        let first = LANProxy(listenPort: lanPort, targetPort: origin.port)
+        try first.start()
+        XCTAssertEqual(try get("http://127.0.0.1:\(lanPort)/"), "ok")
+        first.stop()
+
+        let second = LANProxy(listenPort: lanPort, targetPort: origin.port)
+        XCTAssertNoThrow(try second.start(), "the port should be free the instant stop() returns")
+        defer { second.stop() }
+        XCTAssertEqual(try get("http://127.0.0.1:\(lanPort)/"), "ok")
+    }
+
     func testRefusesAPortThatIsAlreadyTaken() throws {
         let occupied = try TestListener()
         defer { occupied.close() }

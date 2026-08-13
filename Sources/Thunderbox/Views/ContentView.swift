@@ -60,6 +60,7 @@ struct ContentView: View {
             }
             Spacer()
             if scanning { ProgressView().controlSize(.small).padding(.trailing, 4) }
+            DashboardButton(dashboard: store.dashboard)
             Toggle("Servers only", isOn: $showServersOnly)
                 .toggleStyle(.checkbox)
                 .disabled(store.services.isEmpty)
@@ -148,6 +149,27 @@ struct ContentView: View {
 
     private func stopAll() {
         for s in store.services where s.state.isActive { store.stop(s) }
+    }
+}
+
+/// Header button for Thunderbox's own LAN status page: shows a QR code any phone
+/// on the network can scan to see (and open) whatever is running. Hidden until
+/// the dashboard server is actually listening.
+private struct DashboardButton: View {
+    @ObservedObject var dashboard: DashboardServer
+    @State private var showQR = false
+
+    var body: some View {
+        if let url = dashboard.url {
+            Button { showQR = true } label: {
+                Label("Phone", systemImage: "iphone")
+            }
+            .help("See what's running from your phone: \(url.absoluteString)")
+            .popover(isPresented: $showQR, arrowEdge: .bottom) {
+                QRPopover(url: url, name: "Thunderbox on your network",
+                          footnote: "Scan with your phone's camera, then Add to Home Screen for one-tap access.")
+            }
+        }
     }
 }
 

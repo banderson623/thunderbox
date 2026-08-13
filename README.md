@@ -96,20 +96,45 @@ one's taken** and conflicts resolve silently instead of stopping you.
 
 The **Environment** section of the same sheet sets any other variables the service needs.
 
-## Exposing a service to the network
+## Reaching servers from your phone (LAN)
 
-A dev server bound to `127.0.0.1` can't be reached from your phone, a tablet, or a colleague's
-laptop — and telling each framework to bind `0.0.0.0` means a different flag or variable every
-time (`vite --host`, `next -H`, `uvicorn --host`, `HOST=`, `STREAMLIT_SERVER_ADDRESS=`).
+**The dashboard.** Thunderbox serves its own status page on the network at
+`http://<your-mac>.local:4141` (first free port of 4141–4143, 4151). Click the **Phone**
+button in the header for a QR code — scan it once, **Add to Home Screen**, and it installs
+as a real home-screen web app: the Thunderbox app icon (served straight from the running
+app, no extra assets), its own name, full-screen with no Safari chrome. From then on one
+tap from anywhere in the house shows every service, its state and RAM, with links to the
+ones that are reachable. The page is read-only and refreshes itself; starting and stopping
+stays on the Mac.
 
-Instead, right-click a server row → **Expose on LAN** (or the switch in **Edit…**). Thunderbox
-runs a **TCP relay**: it listens on every interface and forwards to `localhost:<port>`. The
-service keeps binding loopback and needs no changes at all.
+**Per-server links.** When a server is running, Thunderbox checks how it's *actually* bound —
+a banner saying `http://localhost:3000` doesn't tell you whether the socket is on `127.0.0.1`
+or `0.0.0.0`, so it asks `lsof` instead of trusting the text:
+
+- **Reachable from the network** → the row grows a second link,
+  `http://<your-mac>.local:<port>` — your Mac's Bonjour name, which every Apple device on
+  the network resolves and which stays stable across reboots and DHCP changes. Next to it,
+  a **QR button** shows a code you can scan with your phone's camera to open the server
+  directly. Thunderbox also **broadcasts the service over Bonjour** (`_http._tcp`) under its
+  service name, so network-browser apps can discover it.
+- **Bound to `127.0.0.1`** → the row says *"localhost only — phones and other devices can't
+  reach it"*, and offers **Expose on LAN**.
+
+### Expose on LAN
+
+You can restart the server listening on `0.0.0.0` — most take `--host 0.0.0.0` or
+`HOST=0.0.0.0` — but that's a different flag or variable for every framework (`vite --host`,
+`next -H`, `uvicorn --host`, `STREAMLIT_SERVER_ADDRESS=`), and it means a restart.
+
+**Expose on LAN** — the button on the row, the context menu, or the switch in **Edit…** —
+skips all of that. Thunderbox runs a **TCP relay**: it listens on every interface and forwards
+to `localhost:<port>`. The server keeps binding loopback and needs no changes at all.
 
 - The relay listens on the service's port **+ 10000** (4321 → 14321). It can't reuse the
-  service's own port — the server already holds that.
-- The console prints every address it's reachable at, including the Mac's Bonjour
-  name (`your-mac.local`), which survives a DHCP lease change.
+  service's own port — the server already holds that one.
+- It works on a process that's *already running*, and switches off again without a restart.
+- The relayed address is advertised over Bonjour and gets the same `.local` link and QR code
+  as a natively-reachable server.
 - It relays at the TCP layer, so `Host` headers, WebSocket upgrades and SSE pass through intact.
 - The relay stops when the service stops, and when you switch it off.
 
@@ -118,11 +143,12 @@ Worth knowing before you flip it on:
 - **There's no authentication in front of it.** Anyone on the network — coffee shop, hotel,
   conference wifi — can reach the service. It's off by default and per-service on purpose.
 - macOS asks **once** whether Thunderbox may accept incoming connections. Because the relay
-  belongs to Thunderbox rather than to `node`, you answer that prompt one time rather than for
-  every framework's binary.
-- `http://192.168.x.x` is **not a secure context** the way `http://localhost` is, so
-  service workers, camera/mic and geolocation will behave differently on a phone than they do
-  on your Mac. That's the browser's rule, not Thunderbox's.
+  belongs to Thunderbox rather than to `node`, you answer that prompt one time instead of for
+  every framework's binary. (Without the relay, check **System Settings → Network → Firewall**
+  and allow incoming connections for the server's own runtime when macOS asks.)
+- `http://192.168.x.x` and `http://<your-mac>.local` are **not secure contexts** the way
+  `http://localhost` is, so service workers, camera/mic and geolocation behave differently on
+  a phone than they do on your Mac. That's the browser's rule, not Thunderbox's.
 - Dev servers with host checking (Vite, webpack-dev-server) may reject a non-localhost `Host`
   header. Add the address to `server.allowedHosts` / `allowedHosts` in that project's config.
 

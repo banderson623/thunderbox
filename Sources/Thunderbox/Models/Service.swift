@@ -134,6 +134,7 @@ final class Service: ObservableObject, Identifiable {
     // Live state (not persisted)
     @Published var state: RunState = .idle
     @Published var detectedURL: URL?
+    @Published var lanBinding: LANBinding = .unknown
     @Published var memoryMB: Double?
     @Published var pid: Int32?
     @Published var lastStartedAt: Date?

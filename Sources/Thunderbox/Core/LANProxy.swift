@@ -33,6 +33,17 @@ final class LANProxy {
     private var listener: NWListener?
     private var pairs: [ObjectIdentifier: Pair] = [:]
     private let queue = DispatchQueue(label: "thunderbox.lanproxy")
+    /// Guards `listener` and `pairs`. A lock rather than the queue so `stop()` can tear
+    /// down synchronously — a restart calls stop-then-start, and an asynchronous cancel
+    /// leaves the old listener still holding the port when the new one tries to bind.
+    /// It also has to be safe to call from the queue itself (the failure handler does).
+    private let lock = NSLock()
+    /// Signalled when the listener reports `.cancelled`, which is when the port is free.
+    private let cancelled = DispatchSemaphore(value: 0)
+    /// Signalled once the listener settles into `.ready` — or fails trying.
+    private let becameReady = DispatchSemaphore(value: 0)
+    private var startupError: NWError?
+    private var didStart = false
 
     /// Called on `queue` when the listener dies on its own (interface loss, port stolen).
     var onFailure: ((Error) -> Void)?
@@ -48,11 +59,11 @@ final class LANProxy {
         guard let port = NWEndpoint.Port(rawValue: UInt16(exactly: listenPort) ?? 0) else {
             throw Failure.portUnavailable(listenPort)
         }
-        // Fail loudly if something already owns the port rather than silently sharing it.
-        guard PortProbe.isFree(listenPort) else { throw Failure.portUnavailable(listenPort) }
-
         let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = false
+        // Sockets left in TIME_WAIT by the previous run must not block a restart — that's
+        // what this option is for. It still refuses when a live listener owns the port,
+        // which is the failure worth reporting.
+        params.allowLocalEndpointReuse = true
         params.includePeerToPeer = false
 
         let listener: NWListener
@@ -66,22 +77,80 @@ final class LANProxy {
             self?.accept(inbound)
         }
         listener.stateUpdateHandler = { [weak self] state in
-            if case .failed(let error) = state {
-                self?.onFailure?(error)
-                self?.stop()
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.becameReady.signal()
+            case .failed(let error):
+                // NWListener binds asynchronously, so a port collision arrives here rather
+                // than out of start(). Before start() has returned, hand the error back to
+                // it; afterwards it's a live relay dying, which is the callback's job.
+                self.lock.lock()
+                let duringStartup = !self.didStart
+                if duringStartup { self.startupError = error }
+                self.lock.unlock()
+
+                if duringStartup {
+                    self.becameReady.signal()
+                } else {
+                    self.onFailure?(error)
+                    // Runs on `queue`: tear down without waiting, or stop()'s wait would
+                    // deadlock against this very handler.
+                    self.teardown(waitingForCancel: false)
+                }
+            case .cancelled:
+                self.cancelled.signal()
+            default:
+                break
             }
         }
-        listener.start(queue: queue)
+
+        lock.lock()
         self.listener = listener
+        lock.unlock()
+        listener.start(queue: queue)
+
+        // Wait for the bind to actually land, so callers learn about a taken port here
+        // instead of discovering a dead relay later.
+        guard becameReady.wait(timeout: .now() + 5) == .success else {
+            teardown(waitingForCancel: false)
+            throw Failure.listenerFailed("Timed out waiting for port \(listenPort).")
+        }
+        lock.lock()
+        let error = startupError
+        didStart = error == nil
+        lock.unlock()
+
+        if let error {
+            teardown(waitingForCancel: false)
+            if case .posix(let code) = error, code == .EADDRINUSE {
+                throw Failure.portUnavailable(listenPort)
+            }
+            throw Failure.listenerFailed(error.localizedDescription)
+        }
     }
 
+    /// Synchronous: returns once the listener has actually reached `.cancelled` and given
+    /// the port back. `cancel()` alone only *starts* that — returning early let a restart
+    /// collide with its own previous listener. Bounded, because a caller waiting forever on
+    /// the network stack is worse than a caller that picks a different port.
     func stop() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.listener?.cancel()
-            self.listener = nil
-            for pair in self.pairs.values { pair.cancel() }
-            self.pairs.removeAll()
+        teardown(waitingForCancel: true)
+    }
+
+    private func teardown(waitingForCancel: Bool) {
+        lock.lock()
+        let listener = self.listener
+        let pairs = self.pairs
+        self.listener = nil
+        self.pairs.removeAll()
+        lock.unlock()
+
+        for pair in pairs.values { pair.cancel() }
+        guard let listener else { return }
+        listener.cancel()
+        if waitingForCancel {
+            _ = cancelled.wait(timeout: .now() + 2)
         }
     }
 
@@ -98,9 +167,14 @@ final class LANProxy {
         let pair = Pair(inbound: inbound, outbound: outbound)
         let key = ObjectIdentifier(pair)
         pair.onClose = { [weak self] in
-            self?.queue.async { self?.pairs[key] = nil }
+            guard let self else { return }
+            self.lock.lock()
+            self.pairs[key] = nil
+            self.lock.unlock()
         }
-        queue.async { self.pairs[key] = pair }
+        lock.lock()
+        pairs[key] = pair
+        lock.unlock()
         pair.start(on: queue)
     }
 
