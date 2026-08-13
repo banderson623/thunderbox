@@ -23,3 +23,8 @@ DerivedData/
 # Logs / temp
 *.log
 *.tmp
+
+# Signing material — never commit private keys/certs
+*.p12
+*.cer
+*.provisionprofile
