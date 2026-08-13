@@ -11,7 +11,10 @@ struct LogLine: Identifiable {
 
 /// Owns the lifecycle and output of a single running service.
 final class ServiceRunner: ObservableObject {
-    unowned let service: Service
+    // Strong on purpose: async work (termination handler, kill watchdog) can outlive the
+    // service's removal from the store, and Service never points back at its runner, so
+    // there is no cycle. `unowned` here would dangle and crash on remove-while-running.
+    let service: Service
 
     @Published private(set) var lines: [LogLine] = []
     private let maxLines = 5000
@@ -24,6 +27,7 @@ final class ServiceRunner: ObservableObject {
     private var stderrRemainder = Data()
     private var ramTimer: Timer?
     private var intentionalStop = false
+    private var pendingRestart = false
     private var urlLocked = false
 
     private let ioQueue = DispatchQueue(label: "thunderbox.io", qos: .utility)
@@ -45,8 +49,11 @@ final class ServiceRunner: ObservableObject {
         guard !(service.state.isActive) else { return }
         intentionalStop = false
         urlLocked = false
-        stdoutRemainder = Data()
-        stderrRemainder = Data()
+        // Remainder buffers belong to ioQueue; reset them there, not on the main thread.
+        ioQueue.async { [weak self] in
+            self?.stdoutRemainder = Data()
+            self?.stderrRemainder = Data()
+        }
 
         appendSystem("$ (cd \(service.displayFolder)) \(service.command)")
 
@@ -81,10 +88,14 @@ final class ServiceRunner: ObservableObject {
         self.stderrPipe = errPipe
 
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            self?.handleData(h.availableData, isError: false)
+            let data = h.availableData
+            if data.isEmpty { h.readabilityHandler = nil }   // EOF: stop the callbacks
+            self?.handleData(data, isError: false)
         }
         errPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            self?.handleData(h.availableData, isError: true)
+            let data = h.availableData
+            if data.isEmpty { h.readabilityHandler = nil }
+            self?.handleData(data, isError: true)
         }
 
         proc.terminationHandler = { [weak self] p in
@@ -127,7 +138,9 @@ final class ServiceRunner: ObservableObject {
         // Signal the whole process group (negative pid).
         kill(-pid, SIGTERM)
         ioQueue.asyncAfter(deadline: .now() + 5) { [weak self] in
-            guard let self, let p = self.process, p.isRunning else { return }
+            // Check the process this watchdog was armed for — a restart may have already
+            // replaced self.process with a fresh one that must not be killed (or blamed).
+            guard let self, self.process === proc, proc.isRunning else { return }
             self.appendSystem("Still alive after 5s — SIGKILL.")
             kill(-pid, SIGKILL)
         }
@@ -135,11 +148,10 @@ final class ServiceRunner: ObservableObject {
 
     func restart() {
         if process?.isRunning == true {
+            // Relaunch as soon as the old process group is actually gone (see
+            // handleTermination) instead of after a fixed worst-case delay.
+            pendingRestart = true
             stop()
-            // Wait for termination, then relaunch.
-            ioQueue.asyncAfter(deadline: .now() + 6) { [weak self] in
-                DispatchQueue.main.async { self?.start() }
-            }
         } else {
             start()
         }
@@ -152,7 +164,18 @@ final class ServiceRunner: ObservableObject {
     // MARK: - Output handling
 
     private func handleData(_ data: Data, isError: Bool) {
-        guard !data.isEmpty else { return }   // EOF
+        guard !data.isEmpty else {   // EOF: flush a trailing line that never got its \n
+            ioQueue.async { [weak self] in
+                guard let self else { return }
+                let remainder = isError ? self.stderrRemainder : self.stdoutRemainder
+                if isError { self.stderrRemainder = Data() } else { self.stdoutRemainder = Data() }
+                guard !remainder.isEmpty else { return }
+                let raw = String(decoding: remainder, as: UTF8.self)
+                self.emit([OutputParser.stripANSI(raw).replacingOccurrences(of: "\r", with: "")],
+                          isError: isError)
+            }
+            return
+        }
         ioQueue.async { [weak self] in
             guard let self else { return }
             var buffer = isError ? self.stderrRemainder + data : self.stdoutRemainder + data
@@ -204,8 +227,8 @@ final class ServiceRunner: ObservableObject {
         let status = p.terminationStatus
         let bySignal = p.terminationReason == .uncaughtSignal
         stopRamTimer()
-        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        // Don't detach the pipe handlers here: output can still be in flight, and they
+        // remove themselves on EOF (which closing the child's write ends guarantees).
 
         DispatchQueue.main.async {
             self.service.pid = nil
@@ -221,6 +244,10 @@ final class ServiceRunner: ObservableObject {
                 self.appendSystem("FAILED — \(bySignal ? "killed by signal" : "exit code") \(status).")
             }
             self.process = nil
+            if self.pendingRestart {
+                self.pendingRestart = false
+                self.start()
+            }
         }
     }
 

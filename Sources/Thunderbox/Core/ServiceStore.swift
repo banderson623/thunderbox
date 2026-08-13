@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 import Darwin
 
 /// The app's single source of truth: the persisted service list + live runners.
@@ -7,6 +8,7 @@ import Darwin
 final class ServiceStore: ObservableObject {
     @Published var services: [Service] = []
     private var runners: [UUID: ServiceRunner] = [:]
+    private var serviceObservers: [UUID: AnyCancellable] = [:]
 
     private let fileURL: URL
 
@@ -30,6 +32,13 @@ final class ServiceStore: ObservableObject {
 
     // MARK: - Mutations
 
+    /// Views that read derived state (running count, isServer filter) observe the store, not
+    /// each service — so any live-state change on a service must republish the store.
+    private func observe(_ service: Service) {
+        serviceObservers[service.id] = service.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+    }
+
     func add(_ newServices: [Service]) {
         // Append new services in the order given (scan results already arrive servers-first).
         // We never re-sort the existing list — the user's manual drag order is authoritative.
@@ -39,6 +48,7 @@ final class ServiceStore: ObservableObject {
                 continue
             }
             services.append(s)
+            observe(s)
         }
         save()
     }
@@ -53,6 +63,7 @@ final class ServiceStore: ObservableObject {
     func remove(_ service: Service) {
         runner(for: service).stop()
         runners[service.id] = nil
+        serviceObservers[service.id] = nil
         clearIcon(for: service)
         services.removeAll { $0.id == service.id }
         save()
@@ -163,6 +174,7 @@ final class ServiceStore: ObservableObject {
         guard let data = try? Data(contentsOf: fileURL) else { return }
         guard let dtos = try? JSONDecoder().decode([ServiceDTO].self, from: data) else { return }
         services = dtos.map(Service.init(dto:))   // preserve saved (manual) order
+        services.forEach(observe)
     }
 
     func save() {
