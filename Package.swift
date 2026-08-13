@@ -10,6 +10,11 @@ let package = Package(
         .executableTarget(
             name: "Thunderbox",
             path: "Sources/Thunderbox"
+        ),
+        .testTarget(
+            name: "ThunderboxTests",
+            dependencies: ["Thunderbox"],
+            path: "Tests/ThunderboxTests"
         )
     ]
 )
