@@ -25,6 +25,9 @@ open build/Thunderbox.app
 
 `build-app.sh` compiles a release binary and assembles `build/Thunderbox.app` (icon +
 Info.plist, signed with your first available identity). Requires the Xcode/Swift toolchain.
+The app icon is rendered per-size by `assets/gen-icon.swift` — small sizes get a simplified
+bolt-only design that stays legible in the Dock and menus. To ship a hand-made 1024×1024
+icon instead: `ICON_PNG=path/to/icon.png ./build-app.sh`.
 
 To build and install into `/Applications` in one step (quits any running copy, replaces it):
 
@@ -132,7 +135,8 @@ Sources/Thunderbox/
                              ConsoleView, AboutView, Theme
 build-app.sh                 Compile + bundle Thunderbox.app
 make-dmg.sh                  Build + package Thunderbox.dmg
-assets/gen-icon.swift        Placeholder icon generator
+assets/gen-icon.swift        App icon generator (size-aware: bolt-only below 64 px)
+Tests/ThunderboxTests/       OutputParser + ScriptScanner tests (swift test)
 initial-decision.md          Why everything is the way it is
 ```
 
