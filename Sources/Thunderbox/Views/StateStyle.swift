@@ -8,6 +8,7 @@ extension RunState {
         case .running: return Theme.accent
         case .stopped: return Theme.textSecondary.opacity(0.8)
         case .failed: return Theme.danger
+        case .blocked: return Theme.amber
         }
     }
 
@@ -18,6 +19,7 @@ extension RunState {
         case .running: return "Running"
         case .stopped: return "Stopped"
         case .failed(let code): return "Failed (\(code))"
+        case .blocked: return "Port in use"
         }
     }
 }

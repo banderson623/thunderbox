@@ -25,9 +25,6 @@ open build/Thunderbox.app
 
 `build-app.sh` compiles a release binary and assembles `build/Thunderbox.app` (icon +
 Info.plist, signed with your first available identity). Requires the Xcode/Swift toolchain.
-The app icon is rendered per-size by `assets/gen-icon.swift` — small sizes get a simplified
-bolt-only design that stays legible in the Dock and menus. To ship a hand-made 1024×1024
-icon instead: `ICON_PNG=path/to/icon.png ./build-app.sh`.
 
 To build and install into `/Applications` in one step (quits any running copy, replaces it):
 
@@ -53,14 +50,81 @@ To build a distributable disk image:
 3. The main window is your control panel: each row shows the project name, its command, an icon,
    status, and — once running — its detected **URL** (clickable), **RAM**, and state. Drag rows
    to reorder them.
-4. **Start / Stop / Restart** per service. If a service crashes or exits non-zero it turns
-   **red (Failed)** and offers **Restart**.
+4. **Start / Stop** per service — one button that reflects what the service is doing. If a
+   service crashes or exits non-zero it turns **red (Failed)**; press Start to try again.
 5. **Console** (terminal icon) opens a per-service window with live stdout/stderr —
    **errors in red** — that you can copy or clear. Output is always captured in the background;
    the window is just hidden until you open it.
 
 Your service list and order persist across launches. **Nothing auto-starts on launch. Quitting
 the app stops every running service.**
+
+## Ports
+
+Two services that want the same port is the most boring way for a dev environment to break,
+so Thunderbox treats it as a first-class case rather than an exit code.
+
+- **Before launching**, if the service's port is already bound, Thunderbox doesn't start it.
+  The row turns **amber (Port in use)** and names the process holding it — including *which
+  other Thunderbox service* it is, when the pid belongs to one of ours. From there you can
+  **stop the holder and start**, **move to a free port**, or just **open what's already
+  answering**, which is often what you wanted.
+- **Two services declaring the same port** are flagged in the header before either one runs.
+- **When a launch fails anyway** — a port Thunderbox never parsed out of the command — it
+  reads the failure. `EADDRINUSE`, `Address already in use`, and plain-English variants are
+  all recognised.
+
+### Overriding the port
+
+There's no universal environment variable. `PORT` is the de-facto standard and much of the
+Node/Ruby world honours it, but plenty of projects pick their own name to avoid colliding with
+an exported `PORT` — a fair trade that costs discoverability. So Thunderbox looks at the
+project instead of guessing:
+
+1. **The error message.** Tools that print the fix (`… start this one on another port with
+   BOOK_READER_PORT=4322`) hand over the whole remedy, and it becomes a one-click button.
+2. **`.env` / `.env.example`** in the project folder, which name the variables outright.
+3. **The source** — `process.env.X_PORT`, `os.environ["X_PORT"]`, `os.getenv(…)` — along with
+   the fallback literal next to them (`?? 4321`), which is the project's real default.
+4. **Framework defaults** for the tools that ignore `PORT`: `STREAMLIT_SERVER_PORT`,
+   `UVICORN_PORT`, `FLASK_RUN_PORT`, `JUPYTER_PORT`, `NUXT_PORT`.
+
+**Edit…** shows what was found in a picker, with the file it came from. Pick one, give it a
+value, and it's set for that service on every launch — over the top of your shell environment,
+so an exported `PORT` in `~/.zshrc` can't beat it. Tick **Move to the next free port if this
+one's taken** and conflicts resolve silently instead of stopping you.
+
+The **Environment** section of the same sheet sets any other variables the service needs.
+
+## Exposing a service to the network
+
+A dev server bound to `127.0.0.1` can't be reached from your phone, a tablet, or a colleague's
+laptop — and telling each framework to bind `0.0.0.0` means a different flag or variable every
+time (`vite --host`, `next -H`, `uvicorn --host`, `HOST=`, `STREAMLIT_SERVER_ADDRESS=`).
+
+Instead, right-click a server row → **Expose on LAN** (or the switch in **Edit…**). Thunderbox
+runs a **TCP relay**: it listens on every interface and forwards to `localhost:<port>`. The
+service keeps binding loopback and needs no changes at all.
+
+- The relay listens on the service's port **+ 10000** (4321 → 14321). It can't reuse the
+  service's own port — the server already holds that.
+- The console prints every address it's reachable at, including the Mac's Bonjour
+  name (`your-mac.local`), which survives a DHCP lease change.
+- It relays at the TCP layer, so `Host` headers, WebSocket upgrades and SSE pass through intact.
+- The relay stops when the service stops, and when you switch it off.
+
+Worth knowing before you flip it on:
+
+- **There's no authentication in front of it.** Anyone on the network — coffee shop, hotel,
+  conference wifi — can reach the service. It's off by default and per-service on purpose.
+- macOS asks **once** whether Thunderbox may accept incoming connections. Because the relay
+  belongs to Thunderbox rather than to `node`, you answer that prompt one time rather than for
+  every framework's binary.
+- `http://192.168.x.x` is **not a secure context** the way `http://localhost` is, so
+  service workers, camera/mic and geolocation will behave differently on a phone than they do
+  on your Mac. That's the browser's rule, not Thunderbox's.
+- Dev servers with host checking (Vite, webpack-dev-server) may reject a non-localhost `Host`
+  header. Add the address to `server.allowedHosts` / `allowedHosts` in that project's config.
 
 ## How services run
 
@@ -76,6 +140,8 @@ perl -e 'setsid(); exec @ARGV'  →  /bin/zsh -ilc "cd <folder> && <command>"
   entire tree (npm → node → webpack, or zsh → flask → workers) with a single signal — no
   orphaned servers.
 - `PYTHONUNBUFFERED=1` is set so Python servers' startup banners/URLs appear immediately.
+- Per-service variables from **Edit…** are applied last, so they win over anything your
+  `~/.zshrc` exported.
 
 ## Releases
 
@@ -135,7 +201,7 @@ Sources/Thunderbox/
                              ConsoleView, AboutView, Theme
 build-app.sh                 Compile + bundle Thunderbox.app
 make-dmg.sh                  Build + package Thunderbox.dmg
-assets/gen-icon.swift        App icon generator (size-aware: bolt-only below 64 px)
+assets/gen-icon.swift        Placeholder icon generator
 Tests/ThunderboxTests/       OutputParser + ScriptScanner tests (swift test)
 initial-decision.md          Why everything is the way it is
 ```

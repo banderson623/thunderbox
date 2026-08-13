@@ -26,6 +26,8 @@ final class ServiceStore: ObservableObject {
     func runner(for service: Service) -> ServiceRunner {
         if let r = runners[service.id] { return r }
         let r = ServiceRunner(service: service)
+        // Lets a port conflict say "books is holding it" instead of "pid 11461 is".
+        r.identifyHolder = { [weak self] pid in self?.serviceOwning(pid: pid) }
         runners[service.id] = r
         return r
     }
@@ -149,6 +151,72 @@ final class ServiceStore: ObservableObject {
     func restart(_ service: Service) { runner(for: service).restart() }
 
     var runningCount: Int { services.filter { $0.state.isActive }.count }
+
+    // MARK: - Port conflicts
+
+    /// Which service — if any — owns the process holding a port. `livePID` is the
+    /// setsid leader, so its pid *is* the process group id of everything it spawned;
+    /// the listener is typically a `node`/`python` grandchild inside that group.
+    func serviceOwning(pid: Int32) -> UUID? {
+        let group = getpgid(pid)
+        guard group > 0 else { return nil }
+        for (id, runner) in runners where runner.livePID == group { return id }
+        return nil
+    }
+
+    func service(id: UUID) -> Service? { services.first { $0.id == id } }
+
+    /// Stop whatever holds the conflicting port, then start the blocked service. Prefers
+    /// the polite path when it's one of ours (SIGTERM to the whole group via its runner)
+    /// and falls back to signalling the bare pid for strangers.
+    func resolveConflict(for service: Service, thenStart: Bool = true) {
+        guard let conflict = service.conflict else { return }
+        if let otherID = conflict.ownedByServiceID, let other = self.service(id: otherID) {
+            stop(other)
+        } else if let holder = conflict.holder {
+            kill(holder.pid, SIGTERM)
+        }
+        guard thenStart else { return }
+        // Give the port a moment to be released before reclaiming it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.start(service)
+        }
+    }
+
+    /// Relaunch on a different port, remembering the variable that moved it.
+    func retryOnFreePort(_ service: Service) {
+        guard let conflict = service.conflict,
+              let variable = conflict.suggestedVar,
+              let port = conflict.suggestedPort else { return }
+        runner(for: service).retry(settingVar: variable, to: port)
+        save()
+    }
+
+    /// Services whose declared ports collide — knowable before either one runs.
+    var portCollisions: [Int: [Service]] {
+        // Configured, not active: this is advice about what the services are set up to do,
+        // and a leftover port from a stopped run would hide a real clash.
+        let servers = services.filter { $0.isServer && $0.configuredPort != nil }
+        return Dictionary(grouping: servers, by: { $0.configuredPort! })
+            .filter { $0.value.count > 1 }
+    }
+
+    // MARK: - LAN exposure
+
+    func setLANExposed(_ exposed: Bool, for service: Service) {
+        service.lanExposed = exposed
+        save()
+        let r = runner(for: service)
+        if exposed {
+            if service.state.isActive { r.startLANIfWanted() }
+        } else {
+            r.stopLAN()
+        }
+        objectWillChange.send()
+    }
+
+    /// Addresses other machines can use to reach this Mac. Empty when offline.
+    var lanAddresses: [LANAddress] { PortProbe.lanAddresses() }
 
     /// Stop every running service before the app exits. Sourced from the live runner
     /// processes (not UI state) so nothing is missed. SIGTERM each process group, wait

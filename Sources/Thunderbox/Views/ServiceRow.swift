@@ -42,11 +42,20 @@ struct ServiceRow: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(Theme.amber)
                     }
+                    if let lan = service.lanURL {
+                        Link(destination: lan) {
+                            Label(lan.absoluteString, systemImage: "wifi").font(.callout)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.accent)
+                        .help("Reachable from other machines on this network")
+                    }
                     if let mb = service.memoryMB {
                         Label(formatMB(mb), systemImage: "memorychip")
                             .font(.callout).foregroundStyle(Theme.textSecondary)
                     }
                 }
+                if let conflict = service.conflict { conflictStrip(conflict) }
             }
 
             Spacer()
@@ -77,6 +86,10 @@ struct ServiceRow: View {
                     Button("Remove Icon", role: .destructive) { store.clearIcon(for: service) }
                 }
             }
+            Toggle("Expose on LAN", isOn: Binding(
+                get: { service.lanExposed },
+                set: { store.setLANExposed($0, for: service) }))
+            .disabled(!service.isServer)
             Button("Reveal in Finder") { revealInFinder() }
             Button("Open Console") { openConsole() }
             Button("Copy Command") {
@@ -86,6 +99,37 @@ struct ServiceRow: View {
             Divider()
             Button("Remove", role: .destructive) { store.remove(service) }
         }
+    }
+
+    /// Shown instead of a bare red exit code when a launch lost the race for its port.
+    /// Every button here is a way out: take the port, move off it, or just open what's
+    /// already answering — which is often what the user actually wanted.
+    @ViewBuilder private func conflictStrip(_ conflict: PortConflict) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(conflict.summary, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout).foregroundStyle(Theme.amber)
+
+            HStack(spacing: 8) {
+                if let other = conflict.ownedByServiceID.flatMap({ store.service(id: $0) }) {
+                    Button("Stop \(other.name) & start") { store.resolveConflict(for: service) }
+                } else if let holder = conflict.holder {
+                    Button("Stop \(holder.command) (\(holder.pid)) & start") {
+                        store.resolveConflict(for: service)
+                    }
+                }
+                if let variable = conflict.suggestedVar, let port = conflict.suggestedPort {
+                    Button("Use \(variable)=\(port)") { store.retryOnFreePort(service) }
+                        .help("Relaunch on port \(port) and remember \(variable) for next time")
+                }
+                if let url = URL(string: "http://localhost:\(conflict.port)") {
+                    Link("Open :\(conflict.port)", destination: url)
+                }
+            }
+            .font(.callout)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.top, 2)
     }
 
     // Leading project avatar: custom icon or a placeholder tile, with the status dot as a
@@ -120,13 +164,6 @@ struct ServiceRow: View {
 
     @ViewBuilder private var controls: some View {
         HStack(spacing: 8) {
-            if service.state.canRestart {
-                Button { store.restart(service) } label: {
-                    Label("Restart", systemImage: "arrow.clockwise")
-                }
-                .help("Restart this service")
-            }
-
             if service.state.isActive {
                 Button(role: .destructive) { store.stop(service) } label: {
                     Label("Stop", systemImage: "stop.fill")
@@ -163,6 +200,7 @@ struct ServiceRow: View {
         switch service.state {
         case .running, .starting: return Theme.accent.opacity(0.16)
         case .failed:             return Theme.danger.opacity(0.12)
+        case .blocked:            return Theme.amber.opacity(0.12)
         default:                  return Theme.surface
         }
     }
@@ -171,17 +209,23 @@ struct ServiceRow: View {
         switch service.state {
         case .running, .starting: return Theme.accent.opacity(0.75)
         case .failed:             return Theme.danger.opacity(0.65)
+        case .blocked:            return Theme.amber.opacity(0.65)
         default:                  return Theme.surfaceStroke
         }
     }
 
-    private var cardStrokeWidth: CGFloat { service.state.isActive || cardIsFailed ? 1.6 : 1 }
-    private var cardIsFailed: Bool { if case .failed = service.state { return true }; return false }
+    private var cardStrokeWidth: CGFloat { service.state.isActive || cardIsFlagged ? 1.6 : 1 }
+
+    /// Failed or blocked — either way the card should assert itself.
+    private var cardIsFlagged: Bool {
+        switch service.state { case .failed, .blocked: return true; default: return false }
+    }
 
     private var cardGlow: Color {
         switch service.state {
         case .running, .starting: return Theme.accent.opacity(0.40)
         case .failed:             return Theme.danger.opacity(0.30)
+        case .blocked:            return Theme.amber.opacity(0.30)
         default:                  return .clear
         }
     }
