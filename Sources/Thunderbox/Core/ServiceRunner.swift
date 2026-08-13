@@ -25,9 +25,18 @@ final class ServiceRunner: ObservableObject {
     private var ramTimer: Timer?
     private var intentionalStop = false
     private var urlLocked = false
+    /// Set once output says the port is taken; keeps later lines under scrutiny for the
+    /// env var the tool suggests, which is usually printed on the *following* line.
+    private var watchingForPortVar = false
+
+    private var proxy: LANProxy?
     private let advertiser = BonjourAdvertiser()
 
     private let ioQueue = DispatchQueue(label: "thunderbox.io", qos: .utility)
+
+    /// Set by the store so a port conflict can name the other Thunderbox service holding
+    /// the port, rather than just a bare pid.
+    var identifyHolder: ((Int32) -> UUID?)?
 
     init(service: Service) {
         self.service = service
@@ -46,10 +55,37 @@ final class ServiceRunner: ObservableObject {
         guard !(service.state.isActive) else { return }
         intentionalStop = false
         urlLocked = false
+        watchingForPortVar = false
         stdoutRemainder = Data()
         stderrRemainder = Data()
 
+        var overrides = service.env
+
+        // Preflight: if we know which port this wants and something already holds it,
+        // don't launch into a guaranteed EADDRINUSE — either move the service or stop and
+        // explain, which is far more useful after the fact than a red exit code.
+        if let wanted = service.configuredPort, !PortProbe.isFree(wanted) {
+            switch resolvePortConflict(wanted: wanted, overrides: &overrides) {
+            case .blocked:
+                return
+            case .moved(let newPort):
+                appendSystem("Port \(wanted) is taken — starting on \(newPort) instead.")
+            }
+        }
+
+        let launchPort = service.portVar.flatMap { overrides[$0] }.flatMap(Int.init)
+            ?? service.declaredPort
+        DispatchQueue.main.async {
+            self.service.conflict = nil
+            self.service.activePort = launchPort
+        }
+
         appendSystem("$ (cd \(service.displayFolder)) \(service.command)")
+        if !overrides.isEmpty {
+            let rendered = overrides.sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+            appendSystem("env: \(rendered)")
+        }
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
@@ -72,6 +108,9 @@ final class ServiceRunner: ObservableObject {
         env["PYTHONUNBUFFERED"] = "1"
         // Keep logs clean: we color by stream (stderr=red) and strip ANSI ourselves.
         env["FORCE_COLOR"] = env["FORCE_COLOR"] ?? "0"
+        // Per-service overrides win over the inherited shell environment — that's the
+        // point of them. An exported PORT in ~/.zshrc must not beat an explicit setting.
+        for (key, value) in overrides { env[key] = value }
         proc.environment = env
 
         let outPipe = Pipe(); let errPipe = Pipe()
@@ -107,7 +146,7 @@ final class ServiceRunner: ObservableObject {
             self.service.state = .starting
             self.service.lastStartedAt = Date()
             self.service.memoryMB = nil
-            self.service.detectedURL = self.service.declaredPort.flatMap {
+            self.service.detectedURL = launchPort.flatMap {
                 URL(string: "http://localhost:\($0)")
             }
             self.service.lanBinding = .unknown
@@ -119,10 +158,12 @@ final class ServiceRunner: ObservableObject {
             guard let self, self.process?.isRunning == true,
                   self.service.state == .starting else { return }
             self.service.state = .running
+            self.startLANIfWanted()
         }
     }
 
     func stop() {
+        stopLAN()
         guard let proc = process, proc.isRunning else { return }
         intentionalStop = true
         let pid = proc.processIdentifier
@@ -152,6 +193,137 @@ final class ServiceRunner: ObservableObject {
         DispatchQueue.main.async { self.lines.removeAll() }
     }
 
+    // MARK: - Port conflicts
+
+    private enum ConflictOutcome {
+        case blocked
+        case moved(Int)
+    }
+
+    /// Decide what to do about a port that's already taken. Moves the service when it has
+    /// a knob to turn and the user asked for that; otherwise refuses to launch and records
+    /// who's holding the port so the UI can offer a way out.
+    private func resolvePortConflict(wanted: Int,
+                                     overrides: inout [String: String]) -> ConflictOutcome {
+        let holder = PortProbe.holder(of: wanted)
+
+        if service.autoPort, let portVar = service.portVar,
+           let free = PortProbe.nextFree(from: wanted + 1) {
+            overrides[portVar] = String(free)
+            return .moved(free)
+        }
+
+        var conflict = PortConflict(port: wanted, holder: holder)
+        conflict.ownedByServiceID = holder.flatMap { identifyHolder?($0.pid) }
+        conflict.suggestedVar = service.portVar
+        conflict.suggestedPort = PortProbe.nextFree(from: wanted + 1)
+
+        appendSystem(conflict.summary)
+        if holder?.isLoopbackOnly == true {
+            appendSystem("Bound to loopback only — it's something on this Mac, not the network.")
+        }
+        DispatchQueue.main.async {
+            self.service.conflict = conflict
+            self.service.state = .blocked
+            self.service.detectedURL = URL(string: "http://localhost:\(wanted)")
+        }
+        return .blocked
+    }
+
+    /// Relaunch on a specific port by setting `variable` for this run and keeping it, so
+    /// the choice sticks. Drives the "retry on 4322" remedy in the UI.
+    func retry(settingVar variable: String, to port: Int) {
+        service.portVar = variable
+        service.env[variable] = String(port)
+        service.declaredPort = port
+        service.activePort = nil
+        start()
+    }
+
+    // MARK: - LAN exposure
+
+    /// The port the relay listens on. It cannot be the service's own port — the server
+    /// already holds that on loopback and binding 0.0.0.0 to it would collide — so the
+    /// default shifts by 10000 (4321 → 14321), which stays recognisable.
+    static func defaultLANPort(for target: Int) -> Int {
+        let shifted = target + 10_000
+        let candidate = shifted < 65_536 ? shifted : target + 1
+        return PortProbe.nextFree(from: candidate) ?? candidate
+    }
+
+    func startLANIfWanted() {
+        guard service.lanExposed, proxy == nil else { return }
+        guard let target = service.activePort ?? service.detectedURL?.port else {
+            appendSystem("LAN: no port known yet — nothing to relay.")
+            return
+        }
+        // Prefer the port this service used last so links stay stable, but never insist on
+        // it: something may have taken it while the service was stopped. Ask for it and
+        // fall back — a working relay on a different port beats a stable port that fails.
+        var listen = service.lanPort ?? Self.defaultLANPort(for: target)
+
+        // Wired before start(), so a listener that dies during startup is still reported.
+        let makeProxy: (Int) -> LANProxy = { [weak self] port in
+            let proxy = LANProxy(listenPort: port, targetPort: target)
+            proxy.onFailure = { error in
+                self?.appendSystem("LAN relay stopped: \(error.localizedDescription)")
+                DispatchQueue.main.async { self?.service.lanURL = nil }
+            }
+            return proxy
+        }
+
+        var proxy = makeProxy(listen)
+        do {
+            try proxy.start()
+        } catch {
+            guard let fallback = PortProbe.nextFree(from: listen + 1), fallback != listen else {
+                appendSystem("LAN relay failed: \(error.localizedDescription)")
+                return
+            }
+            appendSystem("LAN: port \(listen) wouldn't bind — using \(fallback) instead.")
+            listen = fallback
+            proxy = makeProxy(listen)
+            do {
+                try proxy.start()
+            } catch {
+                appendSystem("LAN relay failed: \(error.localizedDescription)")
+                return
+            }
+        }
+        self.proxy = proxy
+
+        let addresses = PortProbe.lanAddresses()
+        let bonjour = LANPresence.localHostname
+        DispatchQueue.main.async {
+            self.service.lanPort = listen
+            self.service.lanURL = URL(string: "http://\(bonjour):\(listen)")
+            // The relay listens on every interface even when the server behind it doesn't,
+            // so from the network's point of view this service is now reachable.
+            self.service.lanBinding = .allInterfaces
+            self.advertiser.advertise(name: self.service.name, port: listen)
+        }
+        appendSystem("LAN relay up on :\(listen) → localhost:\(target)")
+        appendSystem("  http://\(bonjour):\(listen)  (Bonjour)")
+        for address in addresses {
+            appendSystem("  http://\(address.ip):\(listen)  (\(address.label))")
+        }
+        appendSystem("Anyone on this network can reach it — there's no authentication in front.")
+    }
+
+    func stopLAN() {
+        guard proxy != nil else { return }
+        proxy?.stop()
+        proxy = nil
+        appendSystem("LAN relay stopped.")
+        DispatchQueue.main.async {
+            self.service.lanURL = nil
+            self.advertiser.stop()
+            // Re-check the server's own binding: without the relay it may be loopback-only.
+            self.service.lanBinding = .unknown
+            if self.service.state.isActive { self.scheduleLANCheck() }
+        }
+    }
+
     // MARK: - Output handling
 
     private func handleData(_ data: Data, isError: Bool) {
@@ -173,12 +345,18 @@ final class ServiceRunner: ObservableObject {
         }
     }
 
-    private func emit(_ texts: [String], isError: Bool) {
-        // URL detection off the main thread.
+    /// `isSystem` marks Thunderbox's own `»` notes. They must never reach the parsers:
+    /// several of them talk *about* ports ("LAN relay failed: Port 15173 is already in
+    /// use"), and scanning them makes the app read its own commentary back as if the
+    /// service had reported a conflict.
+    private func emit(_ texts: [String], isError: Bool, isSystem: Bool = false) {
+        // URL and conflict detection off the main thread.
         var foundURL: URL?
-        if !urlLocked {
+        if !urlLocked, !isSystem {
             for t in texts { if let u = OutputParser.detectURL(in: t) { foundURL = u; break } }
         }
+        let conflict = isSystem ? nil : scanForConflict(texts)
+
         let now = Date()
         var newLines: [LogLine] = []
         for t in texts {
@@ -193,13 +371,49 @@ final class ServiceRunner: ObservableObject {
             if let u = foundURL, self.service.isServer {
                 self.service.detectedURL = u
                 self.urlLocked = true
+                if let p = u.port { self.service.activePort = p }
                 self.scheduleLANCheck()
             }
+            if let conflict { self.service.conflict = self.merged(conflict) }
         }
     }
 
+    /// Read a port collision out of the service's own words. Catches what the preflight
+    /// can't: a port we never parsed from the command. Tools that print the override to
+    /// use (`… with BOOK_READER_PORT=4322`) hand over the entire remedy.
+    private func scanForConflict(_ texts: [String]) -> PortConflict? {
+        var result: PortConflict?
+        for text in texts {
+            let (isConflict, port) = OutputParser.detectPortConflict(in: text)
+            if isConflict {
+                watchingForPortVar = true
+                result = PortConflict(port: port ?? service.effectivePort ?? 0, holder: nil)
+            }
+            if watchingForPortVar, let hint = OutputParser.detectPortVar(in: text) {
+                var conflict = result
+                    ?? PortConflict(port: service.effectivePort ?? 0, holder: nil)
+                conflict.suggestedVar = hint.name
+                conflict.suggestedPort = hint.port ?? conflict.suggestedPort
+                result = conflict
+            }
+        }
+        return result
+    }
+
+    /// Keep whatever the preflight already learned (the holding process, the sibling
+    /// service) while layering on what the output revealed.
+    private func merged(_ incoming: PortConflict) -> PortConflict {
+        guard let existing = service.conflict else { return incoming }
+        var result = existing
+        result.suggestedVar = incoming.suggestedVar ?? existing.suggestedVar
+        result.suggestedPort = incoming.suggestedPort ?? existing.suggestedPort
+        return result
+    }
+
     private func appendSystem(_ text: String) {
-        ioQueue.async { [weak self] in self?.emit(["» " + text], isError: false) }
+        ioQueue.async { [weak self] in
+            self?.emit(["» " + text], isError: false, isSystem: true)
+        }
     }
 
     // MARK: - Termination
@@ -208,6 +422,7 @@ final class ServiceRunner: ObservableObject {
         let status = p.terminationStatus
         let bySignal = p.terminationReason == .uncaughtSignal
         stopRamTimer()
+        stopLAN()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
 
@@ -222,6 +437,10 @@ final class ServiceRunner: ObservableObject {
             } else if status == 0 && !bySignal {
                 self.service.state = .stopped
                 self.appendSystem("Exited cleanly (code 0).")
+            } else if self.service.conflict != nil {
+                // The exit code is real, but "port in use" says far more than "exit 1".
+                self.service.state = .blocked
+                self.appendSystem("FAILED — \(bySignal ? "killed by signal" : "exit code") \(status).")
             } else {
                 self.service.state = .failed(code: status)
                 self.appendSystem("FAILED — \(bySignal ? "killed by signal" : "exit code") \(status).")
@@ -248,6 +467,10 @@ final class ServiceRunner: ObservableObject {
             guard let self, self.service.state.isActive else { return }
             LANPresence.checkBinding(port: port) { [weak self] binding in
                 guard let self, self.service.state.isActive else { return }
+                // While the relay is up, reachability comes from the relay's socket, not
+                // the server's. Checking the server's port would find 127.0.0.1, downgrade
+                // the service to .localhostOnly, and hide the link that actually works.
+                guard self.proxy == nil else { return }
                 self.service.lanBinding = binding
                 switch binding {
                 case .allInterfaces:

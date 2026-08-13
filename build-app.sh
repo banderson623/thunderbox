@@ -57,6 +57,7 @@ cat > "${CONTENTS}/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Thunderbox relays services you choose to expose so other devices on your network can reach them.</string>
 </dict>
 </plist>
 PLIST

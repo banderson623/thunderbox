@@ -62,10 +62,6 @@ struct ConsoleView: View {
 
     @ViewBuilder private var controls: some View {
         Toggle("Auto-scroll", isOn: $autoScroll).toggleStyle(.checkbox).font(.caption)
-        if service.state.canRestart {
-            Button { store.restart(service) } label: { Image(systemName: "arrow.clockwise") }
-                .help("Restart")
-        }
         if service.state.isActive {
             Button(role: .destructive) { store.stop(service) } label: { Image(systemName: "stop.fill") }
                 .tint(.red).help("Stop")

@@ -53,6 +53,10 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Thunderbox").font(.title3.bold())
                 Text(statusLine).font(.callout).foregroundStyle(Theme.textSecondary)
+                if let clash = collisionWarning {
+                    Label(clash, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(Theme.amber)
+                }
             }
             Spacer()
             if scanning { ProgressView().controlSize(.small).padding(.trailing, 4) }
@@ -85,6 +89,19 @@ struct ContentView: View {
         let running = store.runningCount
         if total == 0 { return "No services yet" }
         return "\(total) service\(total == 1 ? "" : "s") · \(running) running"
+    }
+
+    /// Two services claiming one port is knowable before either of them runs — say so
+    /// rather than waiting for whichever loses the race to fail.
+    private var collisionWarning: String? {
+        let collisions = store.portCollisions
+        guard !collisions.isEmpty else { return nil }
+        return collisions
+            .sorted { $0.key < $1.key }
+            .map { port, services in
+                "\(services.map(\.name).joined(separator: " and ")) both want port \(port)"
+            }
+            .joined(separator: " · ")
     }
 
     private var emptyState: some View {

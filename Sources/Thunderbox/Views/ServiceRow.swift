@@ -48,6 +48,7 @@ struct ServiceRow: View {
                             .font(.callout).foregroundStyle(Theme.textSecondary)
                     }
                 }
+                if let conflict = service.conflict { conflictStrip(conflict) }
                 lanRow
             }
 
@@ -79,6 +80,10 @@ struct ServiceRow: View {
                     Button("Remove Icon", role: .destructive) { store.clearIcon(for: service) }
                 }
             }
+            Toggle("Expose on LAN", isOn: Binding(
+                get: { service.lanExposed },
+                set: { store.setLANExposed($0, for: service) }))
+            .disabled(!service.isServer)
             Button("Reveal in Finder") { revealInFinder() }
             Button("Open Console") { openConsole() }
             Button("Copy Command") {
@@ -90,44 +95,94 @@ struct ServiceRow: View {
         }
     }
 
-    // How to reach this server from other devices on the network: a stable
-    // `mac-name.local` link plus a QR code for phones — or a warning when the
-    // server bound to 127.0.0.1 and the rest of the network can't see it.
-    @ViewBuilder private var lanRow: some View {
-        if service.state.isActive, service.isServer, service.detectedURL != nil {
-            switch service.lanBinding {
-            case .allInterfaces:
-                if let lan = service.detectedURL.flatMap(LANPresence.lanURL(from:)) {
-                    HStack(spacing: 8) {
-                        Link(destination: lan) {
-                            Label(lan.absoluteString, systemImage: "wifi").font(.callout)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Theme.accent)
-                        .help("Reachable from any device on your network — phones included")
-                        Button { showQR = true } label: {
-                            Image(systemName: "qrcode").font(.callout)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Theme.textSecondary)
-                        .help("QR code — scan with your phone's camera")
-                        .popover(isPresented: $showQR, arrowEdge: .bottom) {
-                            QRPopover(url: lan, name: service.name)
-                        }
+    /// Shown instead of a bare red exit code when a launch lost the race for its port.
+    /// Every button here is a way out: take the port, move off it, or just open what's
+    /// already answering — which is often what the user actually wanted.
+    @ViewBuilder private func conflictStrip(_ conflict: PortConflict) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(conflict.summary, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout).foregroundStyle(Theme.amber)
+
+            HStack(spacing: 8) {
+                if let other = conflict.ownedByServiceID.flatMap({ store.service(id: $0) }) {
+                    Button("Stop \(other.name) & start") { store.resolveConflict(for: service) }
+                } else if let holder = conflict.holder {
+                    // Port numbers go through String() before reaching a view: SwiftUI's
+                    // LocalizedStringKey interpolation formats Int with the locale's
+                    // grouping separator, which turns port 15173 into "15,173".
+                    Button("Stop \(holder.command) (\(String(holder.pid))) & start") {
+                        store.resolveConflict(for: service)
                     }
                 }
-            case .localhostOnly:
-                Label("localhost only — phones and other devices can't reach it",
-                      systemImage: "wifi.slash")
-                    .font(.callout)
-                    .foregroundStyle(Theme.textSecondary)
-                    .help("""
-                    This server is bound to 127.0.0.1, so it's invisible to the rest of \
-                    your network. Start it listening on 0.0.0.0 instead — most servers \
-                    accept --host 0.0.0.0 or HOST=0.0.0.0 — then restart it here.
-                    """)
-            case .unknown:
-                EmptyView()
+                if let variable = conflict.suggestedVar, let port = conflict.suggestedPort {
+                    Button("Use \(variable)=\(String(port))") { store.retryOnFreePort(service) }
+                        .help("Relaunch on port \(String(port)) and remember \(variable) next time")
+                }
+                if let url = URL(string: "http://localhost:\(conflict.port)") {
+                    Link("Open :\(String(conflict.port))", destination: url)
+                }
+            }
+            .font(.callout)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.top, 2)
+    }
+
+    // How to reach this server from other devices on the network. A server that already
+    // binds every interface is reachable directly; one bound to 127.0.0.1 isn't, and the
+    // relay fixes that in place rather than asking for a restart with the right flag.
+    @ViewBuilder private var lanRow: some View {
+        if service.state.isActive, service.isServer, service.detectedURL != nil {
+            if let relay = service.lanURL {
+                // The relay is up, so this address works regardless of what the server bound.
+                lanLink(relay, help: "Relayed by Thunderbox — reachable from any device here")
+            } else {
+                switch service.lanBinding {
+                case .allInterfaces:
+                    if let lan = service.detectedURL.flatMap(LANPresence.lanURL(from:)) {
+                        lanLink(lan, help: "Reachable from any device on your network — phones included")
+                    }
+                case .localhostOnly:
+                    HStack(spacing: 8) {
+                        Label("localhost only — phones and other devices can't reach it",
+                              systemImage: "wifi.slash")
+                            .font(.callout)
+                            .foregroundStyle(Theme.textSecondary)
+                        Button("Expose on LAN") { store.setLANExposed(true, for: service) }
+                            .font(.callout)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("""
+                            Relay this port to the network now — no restart, and no hunting \
+                            for this framework's --host flag. Anyone on the network will be \
+                            able to reach it.
+                            """)
+                    }
+                case .unknown:
+                    EmptyView()
+                }
+            }
+        }
+    }
+
+    /// A network address plus the QR code that gets it onto a phone without typing.
+    @ViewBuilder private func lanLink(_ url: URL, help: String) -> some View {
+        HStack(spacing: 8) {
+            Link(destination: url) {
+                Label(url.absoluteString, systemImage: "wifi").font(.callout)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.accent)
+            .help(help)
+            Button { showQR = true } label: {
+                Image(systemName: "qrcode").font(.callout)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.textSecondary)
+            .help("QR code — scan with your phone's camera")
+            .popover(isPresented: $showQR, arrowEdge: .bottom) {
+                QRPopover(url: url, name: service.name)
             }
         }
     }
@@ -164,13 +219,6 @@ struct ServiceRow: View {
 
     @ViewBuilder private var controls: some View {
         HStack(spacing: 8) {
-            if service.state.canRestart {
-                Button { store.restart(service) } label: {
-                    Label("Restart", systemImage: "arrow.clockwise")
-                }
-                .help("Restart this service")
-            }
-
             if service.state.isActive {
                 Button(role: .destructive) { store.stop(service) } label: {
                     Label("Stop", systemImage: "stop.fill")
@@ -207,6 +255,7 @@ struct ServiceRow: View {
         switch service.state {
         case .running, .starting: return Theme.accent.opacity(0.16)
         case .failed:             return Theme.danger.opacity(0.12)
+        case .blocked:            return Theme.amber.opacity(0.12)
         default:                  return Theme.surface
         }
     }
@@ -215,17 +264,23 @@ struct ServiceRow: View {
         switch service.state {
         case .running, .starting: return Theme.accent.opacity(0.75)
         case .failed:             return Theme.danger.opacity(0.65)
+        case .blocked:            return Theme.amber.opacity(0.65)
         default:                  return Theme.surfaceStroke
         }
     }
 
-    private var cardStrokeWidth: CGFloat { service.state.isActive || cardIsFailed ? 1.6 : 1 }
-    private var cardIsFailed: Bool { if case .failed = service.state { return true }; return false }
+    private var cardStrokeWidth: CGFloat { service.state.isActive || cardIsFlagged ? 1.6 : 1 }
+
+    /// Failed or blocked — either way the card should assert itself.
+    private var cardIsFlagged: Bool {
+        switch service.state { case .failed, .blocked: return true; default: return false }
+    }
 
     private var cardGlow: Color {
         switch service.state {
         case .running, .starting: return Theme.accent.opacity(0.40)
         case .failed:             return Theme.danger.opacity(0.30)
+        case .blocked:            return Theme.amber.opacity(0.30)
         default:                  return .clear
         }
     }

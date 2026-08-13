@@ -38,6 +38,9 @@ jobs:
       - name: Show toolchain
         run: swift --version
 
+      - name: Run tests
+        run: swift test
+
       - name: Import Developer ID certificate
         if: env.MACOS_CERT_P12 != ''
         run: |
