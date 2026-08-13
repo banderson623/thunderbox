@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import AppKit
 
 /// A snapshot of one service, frozen for rendering on the phone dashboard.
 struct DashboardEntry {
@@ -83,20 +84,11 @@ final class DashboardServer: ObservableObject {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { data, _, _, error in
             guard error == nil, let data, !data.isEmpty else { conn.cancel(); return }
             let request = String(decoding: data, as: UTF8.self)
-            let isGet = request.hasPrefix("GET ")
             Task { @MainActor [weak self] in
-                let body: String
-                let status: String
-                if !isGet {
-                    status = "405 Method Not Allowed"
-                    body = "Method not allowed."
-                } else {
-                    status = "200 OK"
-                    body = Self.renderHTML(entries: self?.entriesProvider() ?? [])
-                }
-                let payload = Data(body.utf8)
+                let (status, contentType, payload) = self?.respond(to: request)
+                    ?? ("503 Service Unavailable", "text/plain", Data("Gone.".utf8))
                 let head = "HTTP/1.1 \(status)\r\n"
-                    + "Content-Type: text/html; charset=utf-8\r\n"
+                    + "Content-Type: \(contentType)\r\n"
                     + "Content-Length: \(payload.count)\r\n"
                     + "Cache-Control: no-store\r\n"
                     + "Connection: close\r\n\r\n"
@@ -104,6 +96,80 @@ final class DashboardServer: ObservableObject {
                           completion: .contentProcessed { _ in conn.cancel() })
             }
         }
+    }
+
+    /// Route one parsed request. "/" is the page; the icon + manifest routes make
+    /// iOS's Add to Home Screen install it as a proper web app with the app icon.
+    private func respond(to request: String) -> (status: String, type: String, body: Data) {
+        guard request.hasPrefix("GET ") else {
+            return ("405 Method Not Allowed", "text/plain", Data("Method not allowed.".utf8))
+        }
+        let target = request.dropFirst(4).prefix(while: { $0 != " " })
+        let path = target.prefix(while: { $0 != "?" })   // ignore query string
+
+        switch true {
+        case path == "/" || path == "/index.html":
+            let html = Self.renderHTML(entries: entriesProvider())
+            return ("200 OK", "text/html; charset=utf-8", Data(html.utf8))
+        case path.hasPrefix("/apple-touch-icon"):        // iOS probes several names/sizes
+            if let png = iconPNG(sidePixels: 180) {
+                return ("200 OK", "image/png", png)
+            }
+        case path == "/icon-512.png":
+            if let png = iconPNG(sidePixels: 512) {
+                return ("200 OK", "image/png", png)
+            }
+        case path == "/manifest.webmanifest":
+            return ("200 OK", "application/manifest+json", Data(Self.manifest.utf8))
+        default:
+            break
+        }
+        return ("404 Not Found", "text/plain", Data("Not found.".utf8))
+    }
+
+    // MARK: - Web-app install bits
+
+    private static let manifest = """
+    {
+      "name": "Thunderbox",
+      "short_name": "Thunderbox",
+      "description": "What's running on the Mac",
+      "start_url": "/",
+      "display": "standalone",
+      "background_color": "#171a14",
+      "theme_color": "#171a14",
+      "icons": [
+        { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+        { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+      ]
+    }
+    """
+
+    private var iconPNGCache: [Int: Data] = [:]
+
+    /// The app's own icon (Thunderbox.icns in a packaged build), rendered onto the
+    /// page background so iOS home-screen tiles don't get black corners where the
+    /// macOS icon shape is transparent.
+    private func iconPNG(sidePixels: Int) -> Data? {
+        if let cached = iconPNGCache[sidePixels] { return cached }
+        guard let icon = NSApplication.shared.applicationIconImage, icon.isValid,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: sidePixels, pixelsHigh: sidePixels,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .calibratedRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        rep.size = NSSize(width: sidePixels, height: sidePixels)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        let full = NSRect(x: 0, y: 0, width: sidePixels, height: sidePixels)
+        NSColor(srgbRed: 0x17 / 255.0, green: 0x1a / 255.0, blue: 0x14 / 255.0, alpha: 1).setFill()
+        full.fill()
+        icon.draw(in: full, from: .zero, operation: .sourceOver, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = rep.representation(using: .png, properties: [:]) else { return nil }
+        iconPNGCache[sidePixels] = png
+        return png
     }
 
     // MARK: - Page
@@ -159,15 +225,24 @@ final class DashboardServer: ObservableObject {
         <html lang="en">
         <head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
         <meta http-equiv="refresh" content="8">
         <title>Thunderbox</title>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+        <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-title" content="Thunderbox">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="theme-color" content="#171a14">
         <style>
           :root { color-scheme: dark; }
           * { box-sizing: border-box; margin: 0; }
           body { font: -apple-system-body, sans-serif; font-family: -apple-system, system-ui, sans-serif;
-                 background: #171a14; color: #e8eadf; padding: 20px 16px 40px;
-                 max-width: 560px; margin: 0 auto; }
+                 background: #171a14; color: #e8eadf; max-width: 560px; margin: 0 auto;
+                 padding: calc(20px + env(safe-area-inset-top)) 16px
+                          calc(40px + env(safe-area-inset-bottom)); }
           h1 { font-size: 22px; }
           .sub { color: #9aa08e; font-size: 14px; margin: 4px 0 18px; }
           .card { display: flex; align-items: center; gap: 12px; padding: 14px;

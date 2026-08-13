@@ -63,8 +63,10 @@ the app stops every running service.**
 
 **The dashboard.** Thunderbox serves its own status page on the network at
 `http://<your-mac>.local:4141` (first free port of 4141–4143, 4151). Click the **Phone**
-button in the header for a QR code — scan it once, **Add to Home Screen**, and from then on
-one tap from anywhere in the house shows every service, its state and RAM, with links to the
+button in the header for a QR code — scan it once, **Add to Home Screen**, and it installs
+as a real home-screen web app: the Thunderbox app icon (served straight from the running
+app, no extra assets), its own name, full-screen with no Safari chrome. From then on one
+tap from anywhere in the house shows every service, its state and RAM, with links to the
 ones that are reachable. The page is read-only and refreshes itself; starting and stopping
 stays on the Mac.
 
