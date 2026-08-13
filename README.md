@@ -59,6 +59,33 @@ To build a distributable disk image:
 Your service list and order persist across launches. **Nothing auto-starts on launch. Quitting
 the app stops every running service.**
 
+## Reaching servers from your phone (LAN)
+
+**The dashboard.** Thunderbox serves its own status page on the network at
+`http://<your-mac>.local:4141` (first free port of 4141–4143, 4151). Click the **Phone**
+button in the header for a QR code — scan it once, **Add to Home Screen**, and it installs
+as a real home-screen web app: the Thunderbox app icon (served straight from the running
+app, no extra assets), its own name, full-screen with no Safari chrome. From then on one
+tap from anywhere in the house shows every service, its state and RAM, with links to the
+ones that are reachable. The page is read-only and refreshes itself; starting and stopping
+stays on the Mac.
+
+**Per-server links.** When a server is running, Thunderbox checks how it's actually bound:
+
+- **Reachable from the network** → the row grows a second link,
+  `http://<your-mac>.local:<port>` — your Mac's Bonjour name, which every Apple device on
+  the network resolves and which stays stable across reboots and DHCP changes. Next to it,
+  a **QR button** shows a code you can scan with your phone's camera to open the server
+  directly. Thunderbox also **broadcasts the service over Bonjour** (`_http._tcp`) under its
+  service name, so network-browser apps can discover it.
+- **Bound to `127.0.0.1`** → the row says *"localhost only — phones and other devices can't
+  reach it"*. Restart the server listening on `0.0.0.0` (most take `--host 0.0.0.0` or
+  `HOST=0.0.0.0`) and the LAN link appears.
+
+If the LAN link works on the Mac but not from the phone, check **System Settings →
+Network → Firewall** — allow incoming connections for the server's runtime (node, python,
+etc.) when macOS asks.
+
 ## How services run
 
 Each service launches as:

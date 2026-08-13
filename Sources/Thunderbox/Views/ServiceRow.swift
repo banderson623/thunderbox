@@ -5,6 +5,7 @@ struct ServiceRow: View {
     var onEdit: (Service) -> Void = { _ in }
     @EnvironmentObject var store: ServiceStore
     @Environment(\.openWindow) private var openWindow
+    @State private var showQR = false
 
     var body: some View {
         HStack(spacing: 13) {
@@ -47,6 +48,7 @@ struct ServiceRow: View {
                             .font(.callout).foregroundStyle(Theme.textSecondary)
                     }
                 }
+                lanRow
             }
 
             Spacer()
@@ -85,6 +87,48 @@ struct ServiceRow: View {
             }
             Divider()
             Button("Remove", role: .destructive) { store.remove(service) }
+        }
+    }
+
+    // How to reach this server from other devices on the network: a stable
+    // `mac-name.local` link plus a QR code for phones — or a warning when the
+    // server bound to 127.0.0.1 and the rest of the network can't see it.
+    @ViewBuilder private var lanRow: some View {
+        if service.state.isActive, service.isServer, service.detectedURL != nil {
+            switch service.lanBinding {
+            case .allInterfaces:
+                if let lan = service.detectedURL.flatMap(LANPresence.lanURL(from:)) {
+                    HStack(spacing: 8) {
+                        Link(destination: lan) {
+                            Label(lan.absoluteString, systemImage: "wifi").font(.callout)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.accent)
+                        .help("Reachable from any device on your network — phones included")
+                        Button { showQR = true } label: {
+                            Image(systemName: "qrcode").font(.callout)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.textSecondary)
+                        .help("QR code — scan with your phone's camera")
+                        .popover(isPresented: $showQR, arrowEdge: .bottom) {
+                            QRPopover(url: lan, name: service.name)
+                        }
+                    }
+                }
+            case .localhostOnly:
+                Label("localhost only — phones and other devices can't reach it",
+                      systemImage: "wifi.slash")
+                    .font(.callout)
+                    .foregroundStyle(Theme.textSecondary)
+                    .help("""
+                    This server is bound to 127.0.0.1, so it's invisible to the rest of \
+                    your network. Start it listening on 0.0.0.0 instead — most servers \
+                    accept --host 0.0.0.0 or HOST=0.0.0.0 — then restart it here.
+                    """)
+            case .unknown:
+                EmptyView()
+            }
         }
     }
 
